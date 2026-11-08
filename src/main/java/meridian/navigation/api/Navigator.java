@@ -2,11 +2,13 @@ package meridian.navigation.api;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import meridian.core.api.BlockPos;
 import meridian.core.api.Movement;
 
 /**
- * Takes the player somewhere: finds a way over the ground and walks it, move by move, through
- * core's {@link Movement} - walking, jumping up, pulling up onto ledges, dropping down.
+ * Takes the player somewhere: finds a way and goes it, move by move, through core's
+ * {@link Movement} - walking, jumping up, pulling up onto ledges, dropping down, leaping gaps,
+ * swimming, climbing ladders and vines, flying where the player may.
  *
  * <p>A way is found over what core knows of the world. Where the world is not sent yet, the
  * navigator walks as far towards the goal as it can see and looks again from there; where a move
@@ -30,6 +32,9 @@ public interface Navigator {
     /** Ends the trip under way ({@code INTERRUPTED}). */
     void cancel();
 
-    /** One move of a way: of a kind, onto a cell, the feet at that height. */
-    record Step(Movement.Kind kind, int x, int y, int z, double feet) {}
+    /**
+     * One move of a way: of a kind, onto a cell, the feet at that height, at a gait - through the
+     * door at {@code door} when it is not {@code null}, which is opened first.
+     */
+    record Step(Movement.Kind kind, int x, int y, int z, double feet, Movement.Gait gait, BlockPos door) {}
 }

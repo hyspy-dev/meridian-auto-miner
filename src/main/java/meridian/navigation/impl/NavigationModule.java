@@ -25,7 +25,10 @@ public class NavigationModule implements ProxyModule {
     @Override
     public void onEnable(ModuleContext ctx) {
         Movement movement = ctx.services().require(Movement.class);
-        Walker walker = new Walker(movement, ctx.offloadExecutor(), ctx.getLogger());
+        // Doors on the way are opened through core's interactions, where it offers them.
+        meridian.core.api.InteractionControl interactions =
+                ctx.services().get(meridian.core.api.InteractionControl.class).orElse(null);
+        Walker walker = new Walker(movement, interactions, ctx.offloadExecutor(), ctx.getLogger());
         ctx.services().provide(Navigator.class, walker);
         try {
             ctx.registerCommand("nav", USAGE, (args, json) -> command(walker, args));
@@ -57,7 +60,7 @@ public class NavigationModule implements ProxyModule {
                 List<Navigator.Step> steps = walker.plan(goal);
                 Map<String, Object> out = new LinkedHashMap<>();
                 out.put("moves", steps.size());
-                out.put("steps", steps.stream().map(s -> s.kind() + " " + s.x() + " " + s.y() + " " + s.z()).toList());
+                out.put("steps", steps.stream().map(s -> s.kind() + " " + s.x() + " " + s.y() + " " + s.z() + " " + s.gait()).toList());
                 return out;
             });
             default -> throw new IllegalArgumentException(USAGE);
