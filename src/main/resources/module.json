@@ -1,0 +1,14 @@
+{
+  "name": "meridian-navigation",
+  "version": "${project.version}",
+  "main": "meridian.navigation.impl.NavigationModule",
+  "priority": 50,
+  "dependsOn": {
+    "meridian-core": ">=0.1.0"
+  },
+  "requires": {
+    "services": [
+      "meridian.core.api.Movement"
+    ]
+  }
+}
