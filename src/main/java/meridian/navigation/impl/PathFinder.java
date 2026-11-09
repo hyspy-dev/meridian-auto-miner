@@ -41,6 +41,20 @@ final class PathFinder {
             {1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1}
     };
 
+    /**
+     * The room a swimming body needs over the cell it swims in. Navigation's own: core's body is as
+     * tall in a fluid as on land ({@link Movement.Capabilities#height}), crouched when it dives.
+     */
+    static final double SWIM_ROOM = 0.9;
+    /**
+     * The highest a swimmer gets onto a bank, over the cell it swims in - a jump out of the water.
+     * Navigation's own, and short of the body's: core's body leaves the water as a whole jump from
+     * a block under the surface.
+     */
+    static final double BANK_EXIT = 1.6;
+    /** Above a step, a little room: the feet stand on a block's top, not a hair under it. */
+    private static final double STEP_ROOM = 0.1;
+
     /** Where the body is at a place. */
     enum Mode { GROUND, WATER, CLIMB, AIR }
 
@@ -60,9 +74,12 @@ final class PathFinder {
     }
 
     private final Movement movement;
+    /** Where the body stands and fits: the ground, the same for every player. */
+    private final meridian.core.api.World ground;
 
-    PathFinder(Movement movement) {
+    PathFinder(Movement movement, meridian.core.api.World ground) {
         this.movement = movement;
+        this.ground = ground;
     }
 
     /**
@@ -71,7 +88,7 @@ final class PathFinder {
      */
     Way find(int sx, int sy, int sz, double feet, Goal goal, Set<String> banned) {
         Movement.Capabilities caps = movement.capabilities();
-        World w = new World(movement);
+        World w = new World(movement, ground);
         PriorityQueue<Node> open = new PriorityQueue<>((a, b) -> Double.compare(a.f(), b.f()));
         Map<Long, Double> best = new HashMap<>();
         Set<Long> closed = new HashSet<>();
@@ -178,7 +195,7 @@ final class PathFinder {
                     cost = 1.6;
                 } else if (rise < 0 && -rise <= caps.safeDrop()) {
                     kind = Kind.DROP;
-                    cost = 0.3 + Math.sqrt(2 * -rise / 32.0) + 0.3 * -rise / caps.safeDrop();
+                    cost = 0.3 + caps.fallSeconds(-rise) + 0.3 * -rise / caps.safeDrop();
                 } else {
                     continue;
                 }
@@ -279,7 +296,7 @@ final class PathFinder {
             int z = n.z() + d[1];
             for (int dy = 0; dy >= -down; dy--) {
                 int y = n.y() + dy;
-                if (!w.fits(x + 0.5, y, z + 0.5, 0.9)) {
+                if (!w.fits(x + 0.5, y, z + 0.5, SWIM_ROOM)) {
                     break;
                 }
                 if (w.swim(x, y, z)) {
@@ -288,7 +305,7 @@ final class PathFinder {
                     if (fall > caps.safeDrop() && !(w.swim(x, y - 1, z) && w.swim(x, y - 2, z))) {
                         break;
                     }
-                    double cost = 1 / caps.swimSpeed() + Math.sqrt(2 * Math.max(0, fall) / 32.0);
+                    double cost = 1 / caps.swimSpeed() + caps.fallSeconds(fall);
                     out.add(new Node(x, y, z, Mode.WATER, y, n.g() + cost, guess(x, y, z, goal, caps), n, Kind.SWIM,
                             Gait.RUN));
                     break;
@@ -303,9 +320,9 @@ final class PathFinder {
             boolean diagonal = d[0] != 0 && d[1] != 0;
             int x = n.x() + d[0];
             int z = n.z() + d[1];
-            if (w.swim(x, n.y(), z) && w.fits(x + 0.5, n.y(), z + 0.5, 0.9)) {
-                if (diagonal && (!w.fits(n.x() + d[0] + 0.5, n.y(), n.z() + 0.5, 0.9)
-                        || !w.fits(n.x() + 0.5, n.y(), n.z() + d[1] + 0.5, 0.9))) {
+            if (w.swim(x, n.y(), z) && w.fits(x + 0.5, n.y(), z + 0.5, SWIM_ROOM)) {
+                if (diagonal && (!w.fits(n.x() + d[0] + 0.5, n.y(), n.z() + 0.5, SWIM_ROOM)
+                        || !w.fits(n.x() + 0.5, n.y(), n.z() + d[1] + 0.5, SWIM_ROOM))) {
                     continue;
                 }
                 double cost = (diagonal ? Math.sqrt(2) : 1) / caps.swimSpeed();
@@ -315,7 +332,7 @@ final class PathFinder {
         }
         for (int dy : new int[] {1, -1}) {
             int y = n.y() + dy;
-            if (w.swim(n.x(), y, n.z()) && w.fits(n.x() + 0.5, y, n.z() + 0.5, 0.9)) {
+            if (w.swim(n.x(), y, n.z()) && w.fits(n.x() + 0.5, y, n.z() + 0.5, SWIM_ROOM)) {
                 out.add(new Node(n.x(), y, n.z(), Mode.WATER, y, n.g() + 1 / 2.5, guess(n.x(), y, n.z(), goal, caps),
                         n, Kind.SWIM, Gait.RUN));
             }
@@ -332,7 +349,7 @@ final class PathFinder {
                     continue;
                 }
                 double feet = stand.getAsDouble();
-                if (feet - n.feet() > 1.6) {
+                if (feet - n.feet() > BANK_EXIT) {
                     continue;
                 }
                 out.add(new Node(x, y, z, Mode.GROUND, feet, n.g() + 1.0, guess(x, y, z, goal, caps), n, Kind.SWIM,
@@ -381,7 +398,8 @@ final class PathFinder {
                         Kind.CLIMB, Gait.RUN));
             }
         }
-        // Off it: onto ground beside it or at its foot, up to a step above.
+        // Off it: onto ground beside it or at its foot, up to a step above (the body itself gets past
+        // the top with an air step more: core's AIR_STEP_HEIGHT, 0.5).
         for (int i = -1; i < 4; i++) {
             int x = n.x() + (i < 0 ? 0 : DIRS[i][0]);
             int z = n.z() + (i < 0 ? 0 : DIRS[i][1]);
@@ -392,7 +410,7 @@ final class PathFinder {
                     continue;
                 }
                 double feet = stand.getAsDouble();
-                if (feet - n.feet() > 1.1) {
+                if (feet - n.feet() > caps.stepHeight() + STEP_ROOM) {
                     continue;
                 }
                 out.add(new Node(x, y, z, Mode.GROUND, feet, n.g() + per + 0.3, guess(x, y, z, goal, caps), n,
@@ -467,16 +485,18 @@ final class PathFinder {
     /** What the search asks of the world, each answer kept for the search. */
     private static final class World {
         private final Movement movement;
+        private final meridian.core.api.World ground;
         private final Map<Long, OptionalDouble> stands = new HashMap<>();
         private final Map<Long, Movement.Cell> cells = new HashMap<>();
         private final Map<String, Boolean> fits = new HashMap<>();
 
-        World(Movement movement) {
+        World(Movement movement, meridian.core.api.World ground) {
             this.movement = movement;
+            this.ground = ground;
         }
 
         OptionalDouble stand(int x, int y, int z) {
-            return stands.computeIfAbsent(key(x, y, z, Mode.GROUND), k -> movement.standAt(new BlockPos(x, y, z)));
+            return stands.computeIfAbsent(key(x, y, z, Mode.GROUND), k -> ground.standAt(new BlockPos(x, y, z)));
         }
 
         Movement.Cell cell(int x, int y, int z) {
@@ -504,7 +524,7 @@ final class PathFinder {
 
         boolean fits(double x, double feet, double z, double height) {
             String k = x + "," + feet + "," + z + "," + height;
-            return fits.computeIfAbsent(k, kk -> movement.fits(new Vec3(x, feet, z), height));
+            return fits.computeIfAbsent(k, kk -> ground.fits(new Vec3(x, feet, z), height));
         }
     }
 }

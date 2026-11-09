@@ -1,5 +1,6 @@
 package meridian.navigation.impl;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -11,6 +12,7 @@ import meridian.core.api.BlockPos;
 import meridian.core.api.InteractionControl;
 import meridian.core.api.Movement;
 import meridian.core.api.Vec3;
+import meridian.core.api.World;
 import meridian.navigation.api.Goal;
 import meridian.navigation.api.NavResult;
 import meridian.navigation.api.Navigator;
@@ -33,6 +35,7 @@ final class Walker implements Navigator {
     static final int MAX_BANS = 8;
 
     private final Movement movement;
+    private final World world;
     /** Opens doors on the way; {@code null} where core does not offer it - then a door is a wall. */
     private final InteractionControl interactions;
     private final PathFinder finder;
@@ -41,10 +44,11 @@ final class Walker implements Navigator {
     /** The trip under way; a new one, or a cancel, moves it on. */
     private final AtomicInteger trip = new AtomicInteger();
 
-    Walker(Movement movement, InteractionControl interactions, Executor executor, Logger log) {
+    Walker(Movement movement, World world, InteractionControl interactions, Executor executor, Logger log) {
         this.movement = movement;
+        this.world = world;
         this.interactions = interactions;
-        this.finder = new PathFinder(movement);
+        this.finder = new PathFinder(movement, world);
         this.executor = executor;
         this.log = log;
     }
@@ -253,39 +257,19 @@ final class Walker implements Navigator {
      * open. Completes with whether it did.
      */
     private CompletableFuture<Boolean> open(BlockPos door) {
-        CompletableFuture<Boolean> out = new CompletableFuture<>();
         if (interactions == null) {
-            out.complete(false);
-            return out;
+            return CompletableFuture.completedFuture(false);
         }
-        Vec3 feet = movement.position();
-        Movement.Capabilities caps = movement.capabilities();
-        double dx = door.x() + 0.5 - feet.x();
-        double dy = door.y() + 1.0 - (feet.y() + caps.eyeHeight());
-        double dz = door.z() + 0.5 - feet.z();
-        double len = Math.max(1e-6, Math.sqrt(dx * dx + dy * dy + dz * dz));
-        float yaw = (float) Math.atan2(-dx / len, -dz / len);
-        float pitch = (float) Math.asin(dy / len);
-        movement.hold(new Movement.Controls(0, 0, yaw, pitch, false, false, false, false, false));
-        CompletableFuture.delayedExecutor(150, java.util.concurrent.TimeUnit.MILLISECONDS, executor).execute(() ->
-                interactions.useOnBlock(door).whenCompleteAsync((outcome, error) -> {
-                    movement.hold(null);
-                    long until = System.currentTimeMillis() + 1500;
-                    while (System.currentTimeMillis() < until) {
-                        if (movement.cell(door).doorState() == Movement.Door.OPEN) {
-                            out.complete(true);
-                            return;
-                        }
-                        try {
-                            Thread.sleep(50);
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                            break;
-                        }
-                    }
-                    out.complete(false);
-                }, executor));
-        return out;
+        Executor soon = CompletableFuture.delayedExecutor(150, java.util.concurrent.TimeUnit.MILLISECONDS, executor);
+        // Turned to the middle of the door at its lower block's top, the use a moment later, however
+        // it went: then open once the server shows it so.
+        return movement.face(new Vec3(door.x() + 0.5, door.y() + 1.0, door.z() + 0.5))
+                .thenComposeAsync(turned -> interactions.useOnBlock(door), soon)
+                .handle((outcome, error) -> null)
+                .thenCompose(v -> world.awaitBlock(door, b -> movement.cell(door).doorState() == Movement.Door.OPEN,
+                        Duration.ofMillis(1500)))
+                .thenApply(java.util.Optional::isPresent)
+                .exceptionally(error -> false);
     }
 
     /** How far the end of a way is from the goal - a way that only gets nearer has to get nearer each time. */

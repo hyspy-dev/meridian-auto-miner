@@ -28,7 +28,8 @@ public class NavigationModule implements ProxyModule {
         // Doors on the way are opened through core's interactions, where it offers them.
         meridian.core.api.InteractionControl interactions =
                 ctx.services().get(meridian.core.api.InteractionControl.class).orElse(null);
-        Walker walker = new Walker(movement, interactions, ctx.offloadExecutor(), ctx.getLogger());
+        meridian.core.api.World world = ctx.services().require(meridian.core.api.World.class);
+        Walker walker = new Walker(movement, world, interactions, ctx.offloadExecutor(), ctx.getLogger());
         ctx.services().provide(Navigator.class, walker);
         try {
             ctx.registerCommand("nav", USAGE, (args, json) -> command(walker, args));
