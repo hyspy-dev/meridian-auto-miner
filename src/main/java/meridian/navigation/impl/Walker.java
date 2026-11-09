@@ -126,7 +126,7 @@ final class Walker implements Navigator {
                 return way;
             }
             Movement.Prediction pred = movement.predict(moves(way.steps().subList(0, upTo)));
-            if (pred.arrived() >= upTo && !pred.hurt()) {
+            if ((pred.arrived() >= upTo && !pred.hurt()) || unknown(pred)) {
                 return way;
             }
             int bad = Math.min(pred.arrived(), way.steps().size() - 1);
@@ -141,10 +141,18 @@ final class Walker implements Navigator {
         // Still not clean: keep the part the body can go.
         int upTo = untilDoor(way.steps());
         Movement.Prediction pred = movement.predict(moves(way.steps().subList(0, upTo)));
-        if (pred.arrived() < upTo) {
+        if (pred.arrived() < upTo && !unknown(pred)) {
             return new PathFinder.Way(new ArrayList<>(way.steps().subList(0, pred.arrived())), false);
         }
         return way;
+    }
+
+    /**
+     * A prediction with no body to play it on - a game's player whose body is the game's again: it
+     * says nothing about the way, so no move is banned for it.
+     */
+    private static boolean unknown(Movement.Prediction pred) {
+        return pred.result().status() == Movement.MoveResult.Status.NOT_AVAILABLE;
     }
 
     /** How many steps come before the first one through a shut door. */
@@ -184,6 +192,11 @@ final class Walker implements Navigator {
             return;
         }
         PathFinder.Way way = checked(c, p, goal, banned);
+        if (trip.get() != id) {
+            // The body went back to the player while the way was looked for.
+            done.complete(new NavResult(NavResult.Status.INTERRUPTED, movement.position(), moves, replans));
+            return;
+        }
         double gap = gap(way, c, goal);
         if (way.steps().isEmpty() || (!way.complete() && gap >= lastGap)) {
             log.info("navigation: no way from {} to {} ({} move(s), {} replan(s))", p, goal, moves, replans);
