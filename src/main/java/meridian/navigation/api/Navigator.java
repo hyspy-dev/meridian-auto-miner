@@ -20,10 +20,19 @@ import meridian.core.api.Movement;
  */
 public interface Navigator {
 
-    /** Whether the player can be moved here (a headless session). */
+    /**
+     * Whether the player can be moved here: a headless one, or a game's player, whose body core
+     * takes from the game for a trip ({@link Movement#take}).
+     */
     boolean available();
 
-    /** Goes to {@code goal}; completes when there, or when no way is left. */
+    /**
+     * Goes to {@code goal}; completes when there, or when no way is left.
+     *
+     * <p>A game's player's body is taken from the game for the trip and given back at its end -
+     * unless it was held already, and then whoever took it gives it back. The player taking it
+     * back (a key that moves them, the server's teleport, a death) ends the trip {@code INTERRUPTED}.
+     */
     CompletableFuture<NavResult> goTo(Goal goal);
 
     /** The way to {@code goal} as it is found now, without moving - for a look before going. */

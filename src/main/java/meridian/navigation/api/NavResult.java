@@ -21,7 +21,7 @@ public record NavResult(Status status, Vec3 at, int moves, int replans) {
         BLOCKED,
         /** Cancelled, or the server moved the player. */
         INTERRUPTED,
-        /** The player cannot be moved here (not a headless session). */
+        /** The player cannot be moved here: the game has not said where it is, or the server sent no movement settings. */
         NOT_AVAILABLE
     }
 

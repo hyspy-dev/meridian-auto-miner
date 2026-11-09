@@ -7,6 +7,8 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import meridian.api.module.ModuleContext;
 import meridian.api.module.ProxyModule;
+import meridian.api.settings.SettingBinding;
+import meridian.api.settings.SettingsSpec;
 import meridian.core.api.BlockPos;
 import meridian.core.api.Movement;
 import meridian.navigation.api.Goal;
@@ -15,12 +17,22 @@ import meridian.navigation.api.Navigator;
 
 /**
  * meridian-navigation: offers the {@link Navigator} service - a way over the ground, walked through
- * core's {@link Movement} - for other modules to take the player somewhere. On the command channel:
- * {@code nav <conn> goto|plan <x y z> [radius]} and {@code nav <conn> cancel}.
+ * core's {@link Movement} - for other modules to take the player somewhere. A game's player is
+ * taken there too: core takes the body from the game for the trip. In the proxy's window: a point
+ * to go to, filled from where the player stands or the block they last clicked, Go and Stop. On the
+ * command channel: {@code nav <conn> goto|plan <x y z> [radius]} and {@code nav <conn> cancel}.
  */
 public class NavigationModule implements ProxyModule {
 
     private static final String USAGE = "goto <x y z> [radius] | plan <x y z> [radius] | cancel";
+
+    private final SettingBinding<String> xBinding = new SettingBinding<>();
+    private final SettingBinding<String> yBinding = new SettingBinding<>();
+    private final SettingBinding<String> zBinding = new SettingBinding<>();
+    private volatile String xText = "";
+    private volatile String yText = "";
+    private volatile String zText = "";
+    private volatile String status = "Idle.";
 
     @Override
     public void onEnable(ModuleContext ctx) {
@@ -36,7 +48,83 @@ public class NavigationModule implements ProxyModule {
         } catch (NoSuchMethodError olderProxy) {
             // no command channel there
         }
+        ctx.registerSettings(SettingsSpec.builder()
+                .section("Go to a point", SettingsSpec.builder()
+                        .string("x", "X", "", v -> xText = v == null ? "" : v, xBinding)
+                        .string("y", "Y", "", v -> yText = v == null ? "" : v, yBinding)
+                        .string("z", "Z", "", v -> zText = v == null ? "" : v, zBinding)
+                        .button("Fill from current position", () -> fill(movement.position()))
+                        .button("Fill from the last block I clicked", () -> fillLooked(interactions))
+                        .button("Go", () -> go(walker))
+                        .button("Stop", () -> {
+                            walker.cancel();
+                            status = "Stopped.";
+                        })
+                        .build())
+                .liveText("Status", () -> status)
+                .build());
         ctx.getLogger().info("meridian-navigation enabled");
+    }
+
+    /** Fills the point with where the feet are, as the cell they stand in. */
+    private void fill(meridian.core.api.Vec3 at) {
+        if (at == null) {
+            status = "No position yet - join a world and move once.";
+            return;
+        }
+        int[] c = Walker.cellOf(at);
+        set(c[0], c[1], c[2]);
+    }
+
+    /** Fills the point with the cell over the block the player last clicked - where they would stand on it. */
+    private void fillLooked(meridian.core.api.InteractionControl interactions) {
+        BlockPos b = interactions == null ? null : interactions.targetedBlock().orElse(null);
+        if (b == null) {
+            status = "No block clicked yet - click one in the game.";
+            return;
+        }
+        set(b.x(), b.y() + 1, b.z());
+    }
+
+    private void set(int x, int y, int z) {
+        xText = Integer.toString(x);
+        yText = Integer.toString(y);
+        zText = Integer.toString(z);
+        xBinding.set(xText);
+        yBinding.set(yText);
+        zBinding.set(zText);
+    }
+
+    /** Goes to the point in the fields; the status says how it went. */
+    private void go(Walker walker) {
+        BlockPos cell;
+        try {
+            cell = new BlockPos(Integer.parseInt(xText.trim()), Integer.parseInt(yText.trim()),
+                    Integer.parseInt(zText.trim()));
+        } catch (NumberFormatException e) {
+            status = "X, Y and Z must be whole numbers.";
+            return;
+        }
+        if (!walker.available()) {
+            status = "Cannot move the player yet - join a world and move once.";
+            return;
+        }
+        status = "Going to " + cell.x() + " " + cell.y() + " " + cell.z() + "...";
+        walker.goTo(Goal.near(cell, 0)).whenComplete((r, e) -> {
+            if (e != null || r == null) {
+                status = "Failed: " + (e == null ? "no result" : e.getMessage());
+                return;
+            }
+            String where = r.at() == null ? "" : String.format(Locale.ROOT, " at %.1f %.1f %.1f",
+                    r.at().x(), r.at().y(), r.at().z());
+            status = switch (r.status()) {
+                case ARRIVED -> "Arrived" + where + " (" + r.moves() + " moves).";
+                case NO_PATH -> "No way there" + where + ".";
+                case BLOCKED -> "Blocked on the way" + where + ".";
+                case INTERRUPTED -> "Stopped" + where + ".";
+                case NOT_AVAILABLE -> "Cannot move the player here.";
+            };
+        });
     }
 
     private static CompletableFuture<?> command(Walker walker, List<String> args) {

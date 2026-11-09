@@ -43,6 +43,8 @@ final class Walker implements Navigator {
     private final Logger log;
     /** The trip under way; a new one, or a cancel, moves it on. */
     private final AtomicInteger trip = new AtomicInteger();
+    /** The game's body this trip took from the game, to give back when it ends; {@code null} for none. */
+    private volatile Movement.Wheel took;
 
     Walker(Movement movement, World world, InteractionControl interactions, Executor executor, Logger log) {
         this.movement = movement;
@@ -72,6 +74,7 @@ final class Walker implements Navigator {
     public void cancel() {
         trip.incrementAndGet();
         movement.stop();
+        giveBack();
     }
 
     @Override
@@ -79,12 +82,35 @@ final class Walker implements Navigator {
         int id = trip.incrementAndGet();
         movement.stop();
         CompletableFuture<NavResult> done = new CompletableFuture<>();
-        if (!movement.available()) {
+        // A game's body is taken for the trip - unless it is held already, by whoever gives it back.
+        // One a trip before this took is this one's to give back.
+        boolean ours = took != null || !movement.driving();
+        Movement.Wheel wheel = movement.take().orElse(null);
+        if (wheel == null) {
             done.complete(new NavResult(NavResult.Status.NOT_AVAILABLE, movement.position(), 0, 0));
             return done;
         }
+        if (ours) {
+            took = wheel;
+        }
+        // The player takes the body back (a key, the server's teleport, a death): the trip is over.
+        wheel.released().thenRun(() -> trip.compareAndSet(id, id + 1));
+        done.whenComplete((r, e) -> {
+            if (ours && trip.get() == id) {
+                giveBack();
+            }
+        });
         executor.execute(() -> leg(id, goal, done, 0, 0, Double.MAX_VALUE, new HashSet<>()));
         return done;
+    }
+
+    /** Gives the game back the body a trip took. */
+    private void giveBack() {
+        Movement.Wheel w = took;
+        took = null;
+        if (w != null) {
+            w.release();
+        }
     }
 
     /**
