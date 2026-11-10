@@ -33,6 +33,11 @@ is still named `meridian-navigation`: the navigation it once held is core's now.
   - **The chosen chest**: open it in the game, then press **Choose the chest I opened last**.
 - **Mine** and **Stop**. The **Mining** line says how it goes.
 
+The next block is dug the way a player digs, block by block: of the top layer left (or of the
+blocks of the kind), the one cheapest to go on to. That is its distance from the eyes, plus 5 blocks
+for each radian the head turns to it from the block broken last, less 1.5 for a block beside it. So
+the block behind one just broken comes next, and the head goes round once, not back and forth.
+
 A block the worker leaves is left behind and counted: next to lava, no place to break it from, or
 it would not break. A block that comes back after it was broken, because it breaks into another,
 is tried 3 times.

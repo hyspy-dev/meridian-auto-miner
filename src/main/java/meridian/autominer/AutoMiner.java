@@ -34,6 +34,15 @@ final class AutoMiner {
 
     /** The most blocks of a kind the search looks at in one go. */
     static final int FIND_LIMIT = 512;
+    /**
+     * The next block is the one cheapest to go on to: its distance from the eyes, plus this many
+     * blocks for each radian the head turns to it - a quarter turn costs as much as 8 blocks, so the
+     * one behind a block just broken comes before one beside it nearer by: dug on the way the head
+     * looks, not round and round again for each ring.
+     */
+    static final double PER_RADIAN = 5.0;
+    /** A block beside the one broken last comes this much nearer: a player digs on from where they dug. */
+    static final double BESIDE = 1.5;
     /** The largest box dug. */
     static final int MAX_BOX = 32_768;
     /** How often one block may come back after it was broken - a block that breaks into another. */
@@ -397,11 +406,26 @@ final class AutoMiner {
         }
     }
 
-    /** The next block to dig, or {@code null} when none is left. */
+    /**
+     * The next block to dig, or {@code null} when none is left: of the top layer left (or of the
+     * blocks of the kind), the one cheapest to go on to - near the eyes, little turn of the head from
+     * where it looks, beside the block broken last ({@link #cost}). The way a player digs, block by
+     * block, not swinging round to a block behind them.
+     */
     private Block next(Job j) {
         Vec3 me = movement.position();
         if (me == null) {
             return null;
+        }
+        Vec3 eye = new Vec3(me.x(), me.y() + movement.capabilities().eyeHeight(), me.z());
+        BlockPos last = j.broken.isEmpty() ? null : j.broken.get(j.broken.size() - 1);
+        // The way on is reckoned from the block broken last - where the head was meant to be - not
+        // from where it stopped: a look stops short of a block's middle, and that would swap a near
+        // block and a far one the same way.
+        Vec3 look = last != null ? along(eye, last) : null;
+        if (look == null) {
+            Movement.State st = movement.state();
+            look = st == null ? null : new meridian.core.api.Look(st.yaw(), st.pitch()).direction();
         }
         if (j.box == null) {
             if (j.dug >= j.count) {
@@ -414,7 +438,7 @@ final class AutoMiner {
                 if (j.skipped.contains(p)) {
                     continue;
                 }
-                double d = distSq(me, p);
+                double d = cost(eye, look, last, p);
                 if (d < bestD) {
                     bestD = d;
                     best = b;
@@ -436,7 +460,7 @@ final class AutoMiner {
                     if (b.isAir()) {
                         continue;
                     }
-                    double d = distSq(me, p);
+                    double d = cost(eye, look, last, p);
                     if (d < bestD) {
                         bestD = d;
                         best = b;
@@ -480,11 +504,35 @@ final class AutoMiner {
         return a;
     }
 
-    private static double distSq(Vec3 a, BlockPos p) {
-        double dx = a.x() - (p.x() + 0.5);
-        double dy = a.y() - (p.y() + 0.5);
-        double dz = a.z() - (p.z() + 0.5);
-        return dx * dx + dy * dy + dz * dz;
+    /** The unit way from the eyes to a block's middle; {@code null} when the eyes are in it. */
+    private static Vec3 along(Vec3 eye, BlockPos p) {
+        double dx = p.x() + 0.5 - eye.x();
+        double dy = p.y() + 0.5 - eye.y();
+        double dz = p.z() + 0.5 - eye.z();
+        double d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        return d < 1e-6 ? null : new Vec3(dx / d, dy / d, dz / d);
+    }
+
+    /**
+     * What going on to a block costs: its middle's distance from the eyes, {@link #PER_RADIAN} for
+     * each radian the head turns from {@code look} to it, less {@link #BESIDE} when it is one of the
+     * 26 around the block broken last.
+     */
+    static double cost(Vec3 eye, Vec3 look, BlockPos last, BlockPos p) {
+        double dx = p.x() + 0.5 - eye.x();
+        double dy = p.y() + 0.5 - eye.y();
+        double dz = p.z() + 0.5 - eye.z();
+        double d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        double c = d;
+        if (look != null && d > 1e-6) {
+            double dot = (look.x() * dx + look.y() * dy + look.z() * dz) / d;
+            c += PER_RADIAN * Math.acos(Math.max(-1, Math.min(1, dot)));
+        }
+        if (last != null && !last.equals(p) && Math.abs(last.x() - p.x()) <= 1 && Math.abs(last.y() - p.y()) <= 1
+                && Math.abs(last.z() - p.z()) <= 1) {
+            c -= BESIDE;
+        }
+        return c;
     }
 
     private static String text(BlockPos p) {
