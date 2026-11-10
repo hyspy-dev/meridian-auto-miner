@@ -1,7 +1,7 @@
 {
-  "name": "meridian-navigation",
+  "name": "meridian-auto-miner",
   "version": "${project.version}",
-  "main": "meridian.navigation.impl.NavigationModule",
+  "main": "meridian.autominer.AutoMinerModule",
   "priority": 50,
   "dependsOn": {
     "meridian-core": ">=0.1.0"
@@ -9,7 +9,8 @@
   "requires": {
     "services": [
       "meridian.core.api.Movement",
-      "meridian.core.api.World"
+      "meridian.core.api.World",
+      "meridian.core.api.Worker"
     ]
   }
 }

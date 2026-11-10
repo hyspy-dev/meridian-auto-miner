@@ -4,12 +4,12 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>meridian</groupId>
-    <artifactId>meridian-navigation</artifactId>
+    <artifactId>meridian-auto-miner</artifactId>
     <version>0.1.0-SNAPSHOT</version>
 
-    <!-- Navigation: a Layer-2 module offering a service of its own (Navigator) to other modules.
-         It talks only to meridian-api + meridian-core-api - no meridian-protocol, no raw
-         packets: the body and the ground are core's (Movement). -->
+    <!-- Auto-miner: a Layer-2 module that decides what to dig - a selection, or blocks by name -
+         and leaves the walking and the digging to core's Worker. meridian-api + meridian-core-api
+         only: no meridian-protocol, no raw packets. -->
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
