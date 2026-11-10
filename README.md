@@ -17,13 +17,28 @@ is still named `meridian-navigation`: the navigation it once held is core's now.
   - **Blocks by name.** Up to *How many* blocks whose name holds the text (`Ore_Copper`), within
     *Within* blocks of where the player stood when it started, nearest first. A way the body's
     height is broken to a block in the rock, so its drop can be walked to.
+- **Shovel for dirt, gravel and sand**, on by default. Soil is dug with a shovel when the hotbar
+  has one. At the edge of a selection, core takes a tool that does not sweep past the edge: the
+  shovel's arc would break the soil just outside the selection.
+- **Pick up the drops**:
+  - **Leave them**: they stay where they fell.
+  - **After the clearing** (the default).
+  - **Whenever enough lie about**: a round of picking up each time *this many* items lie within
+    4 blocks of what was broken. The rest are picked up at the end.
+- **Unload what was dug**. What the job dug is what the player carries more of than when it
+  started: what was held before stays. It is unloaded when no slot is free in the hotbar, the
+  storage and the backpack, and again at the end.
+  - **Keep it** (the default).
+  - **The nearest chest with room**: chests within 32 blocks, nearest first, until all of it is in.
+  - **The chosen chest**: open it in the game, then press **Choose the chest I opened last**.
 - **Mine** and **Stop**. The **Mining** line says how it goes.
 
 A block the worker leaves is left behind and counted: next to lava, no place to break it from, or
 it would not break. A block that comes back after it was broken, because it breaks into another,
 is tried 3 times.
 
-At the end, the drops within 4 blocks of what was broken are picked up.
+The drops picked up are those within 4 blocks of what was broken; the worker walks into each one's
+cell.
 
 A game's player's body is held for the whole job. These end it:
 
@@ -34,14 +49,18 @@ A game's player's body is held for the whole job. These end it:
 ## On the command channel
 
 ```
-mine <conn> box <x y z x y z>                  -> {status, broken, dug, skipped, picked, left}
+mine <conn> box <x y z x y z>                  -> {status, broken, dug, skipped, picked, left, unloaded}
 mine <conn> selection                          -> the same, for the box dragged with the selection tool
 mine <conn> blocks <name> [count] [radius]
 mine <conn> cancel
+mine <conn> set shovel on|off
+mine <conn> set pickup none|end|every <n>
+mine <conn> set unload off|nearest|chest <x y z>
 ```
 
 ## Not yet
 
 - **Tunnels.** A block deeper in the rock than a tool reaches from open ground is left behind.
-- **A full inventory.** Mining goes on, and its drops stay on the ground.
+- **A full inventory with no chest to unload into.** Mining goes on, and its drops stay on the
+  ground.
 - **A pit deeper than the body climbs out of** (3 blocks). It is dug, and the body stays in it.
