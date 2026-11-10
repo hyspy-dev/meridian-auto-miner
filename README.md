@@ -14,8 +14,9 @@ nav.goTo(Goal.near(new BlockPos(120, 64, -40), 2))
    .thenAccept(r -> { if (r.arrived()) { /* work there */ } });
 ```
 
-Movement is core's, and core moves only a player it plays the client of: a headless session. With
-a game behind the session, `available()` is false.
+Movement is core's. A headless player's body is core's all the time. A game's player is taken
+from the game for the trip (`Movement.take`) and given back at its end. The player takes it back
+at once with a key that moves them; the server's teleport or a death ends the trip as well.
 
 ## How a way is found
 
@@ -54,16 +55,49 @@ a game behind the session, `available()` is false.
   the one before.
 - **One trip at a time.** A new `goTo` ends the trip under way.
 
+## Mining
+
+The proxy window's **Mine** section digs, with the player's own character or a headless one:
+
+- **The selection.** "Selection tool in slot 1" puts the game's own selection tool in the first
+  hotbar slot (core's `BuilderSelection`, 0.6 and later). The box dragged with it is dug out, top
+  layer first, and only inside itself.
+- **Blocks by name.** Up to *How many* blocks whose name holds the text (`Ore_Copper`), within
+  *Within* blocks of where the player stood when it started, nearest first.
+
+Per block:
+
+- **The tool.** The hotbar's tool that breaks it best (`Player.bestToolSlot`, the server's own
+  rule: a spec of the block's gather type, of at least its quality, the strongest).
+- **Where from.** A place within that tool's dig reach (`InteractionControl.digReach`): a pickaxe
+  breaks the block it is aimed at, up to 5 away (4.5 is used); a shovel's sweep reaches 2.5. The
+  body stays where it is when it can, else walks there. It never stands on the block, nor on one in
+  the way.
+- **In the way.** For a block in the rock, a way in the body's height is broken from that place up
+  to the block, so its drop can be walked to; then whatever is still on the line from the eyes.
+- **Left.** A block next to lava, one with no place to break it from (3 places tried), or one that
+  would not break in 30 swings, is left behind.
+
+At the end the drops around what was broken are walked over, nearest first; the server takes one
+within 1.75 of the feet. A game's player is held for the whole job, and a key that moves them ends
+it, as Stop and Go do.
+
 ## On the command channel
 
 ```
 nav <conn> goto <x y z> [radius]   -> {status, at, moves, replans}
 nav <conn> plan <x y z> [radius]   -> the moves (kind, cell, gait), without moving
-nav <conn> cancel
+nav <conn> mine box <x y z x y z>  -> {status, broken, dug, skipped, picked, left}
+nav <conn> mine selection          -> the same, for the box dragged with the selection tool
+nav <conn> mine blocks <name> [count] [radius]
+nav <conn> cancel                  -> ends a trip or a mining job
 ```
 
 ## Not yet
 
 - **Gliding** and **riding**.
 - **Hanging along a ledge** as a way of its own (the body can; the search does not plan it).
-- **Breaking or building** through what is in the way.
+- **Breaking or building** through what is in the way of a trip: a way is found over the ground as
+  it is. Mining breaks only the blocks it came for and the way in to them.
+- **Tunnels.** A block deeper in the rock than a tool reaches from open ground is left behind.
+- **A full inventory**: mining goes on, its drops stay on the ground.
