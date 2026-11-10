@@ -33,7 +33,9 @@ a game behind the session, `available()` is false.
   - a flight.
 - **Doors.** A shut door on the level is a way through, opened first.
 - **Diagonals** are walks and swims only, and only where both corners leave room.
-- **Costs** are seconds. The estimate is the straight distance at the body's fastest.
+- **Costs** are seconds. A jump up and a pull-up go by their length (a block across and the rise, at
+  a run), not by their time, so a shorter way over a ledge wins over a longer one round it. The
+  estimate is the straight distance at the body's fastest.
 - **Budget.** A search stops after 40,000 places or 1.5 s. When the budget runs out, or the world
   beyond is not sent yet, it gives the way to the place it saw nearest the goal. The walker goes
   that far and looks again, the way Baritone plans in segments.

@@ -189,10 +189,12 @@ final class PathFinder {
                     cost = dist / caps.runSpeed();
                 } else if (rise > 0 && rise <= caps.jumpHeight() + 1e-6) {
                     kind = Kind.JUMP;
-                    cost = 0.75;
+                    cost = (dist + rise) / caps.runSpeed();
                 } else if (rise > 0 && rise <= caps.mantleHeight() + 1e-6) {
+                    // By its length, not its time (a pull-up takes 1.5 s): a shorter way over a ledge
+                    // is liked better than a longer one round it.
                     kind = Kind.MANTLE;
-                    cost = 1.6;
+                    cost = (dist + rise) / caps.runSpeed();
                 } else if (rise < 0 && -rise <= caps.safeDrop()) {
                     kind = Kind.DROP;
                     cost = 0.3 + caps.fallSeconds(-rise) + 0.3 * -rise / caps.safeDrop();
