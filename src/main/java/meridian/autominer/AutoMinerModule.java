@@ -20,19 +20,20 @@ import meridian.core.api.World;
  * the player. What to dig is decided here ({@link AutoMiner}); getting at each block and breaking
  * it is core's {@link Worker}. In the proxy's window: the Mine section - what to dig, a shovel for
  * soil, when the drops are picked up, a chest to unload into. On the command channel:
- * {@code mine <conn> box <x y z x y z> | selection | blocks <name> [count] [radius] | cancel}, and
+ * {@code mine <conn> box <x y z x y z> | selection | blocks <name> [count] | cancel}, and
  * {@code mine <conn> set shovel on|off | pickup none|end|every <n> | unload off|nearest|chest <x y z>}.
  */
 public class AutoMinerModule implements ProxyModule {
 
-    private static final String USAGE = "box <x y z x y z> | selection | blocks <name> [count] [radius] | cancel"
-            + " | set shovel on|off | set pickup none|end|every <n> | set unload off|nearest|chest <x y z>";
+    private static final String USAGE = "box <x y z x y z> | selection | blocks <name> [count, -1 no end] | cancel"
+            + " | set shovel on|off | set pickup none|end|every <n>|all | set unload off|nearest|chest <x y z>";
 
     /** When the drops are picked up, as the panel offers it. */
     enum PickUpChoice {
         NONE("Leave them", AutoMiner.PickUp.NONE),
         AT_END("After the clearing", AutoMiner.PickUp.AT_END),
-        EVERY("Whenever enough lie about", AutoMiner.PickUp.EVERY);
+        EVERY("Whenever enough lie about", AutoMiner.PickUp.EVERY),
+        ALL("Everything it dropped, wherever it went", AutoMiner.PickUp.ALL);
 
         private final String label;
         final AutoMiner.PickUp mode;
@@ -87,8 +88,9 @@ public class AutoMinerModule implements ProxyModule {
 
     private volatile MineMode mode = MineMode.SELECTION;
     private volatile String name = "Ore_Copper";
-    private volatile int count = 16;
-    private volatile int radius = 24;
+    /** How many blocks of the kind to dig; -1, as long as there are any. */
+    private volatile int count = -1;
+    private volatile boolean showTarget = true;
     private volatile String note = "";
     private volatile boolean shovel = true;
     private volatile AutoMiner.PickUp pickUp = AutoMiner.PickUp.AT_END;
@@ -106,7 +108,8 @@ public class AutoMinerModule implements ProxyModule {
         meridian.core.api.Containers containers = ctx.services().get(meridian.core.api.Containers.class).orElse(null);
         AutoMiner miner = new AutoMiner(movement, world, worker,
                 ctx.services().get(meridian.core.api.PlayerState.class).orElse(null),
-                ctx.services().get(meridian.core.api.EntityTracker.class).orElse(null), ctx.offloadExecutor(),
+                ctx.services().get(meridian.core.api.EntityTracker.class).orElse(null),
+                ctx.services().get(meridian.core.api.DebugRender.class).orElse(null), ctx.offloadExecutor(),
                 ctx.getLogger());
         try {
             ctx.registerCommand("mine", USAGE, (args, json) -> command(miner, selection, args));
@@ -121,8 +124,7 @@ public class AutoMinerModule implements ProxyModule {
         }
         spec.enum_("mineMode", "What to mine", MineMode.class, MineMode.SELECTION, v -> mode = v)
                 .string("mineName", "Blocks (a part of the name)", name, v -> name = v == null ? "" : v.trim())
-                .int_("mineCount", "How many blocks", 1, 1000, count, v -> count = v)
-                .int_("mineRadius", "Within (blocks of here)", 1, 64, radius, v -> radius = v)
+                .int_("mineCount", "How many to dig (-1: no end)", -1, 100000, count, v -> count = v)
                 .bool("mineShovel", "Shovel for dirt, gravel and sand", shovel, v -> shovel = v)
                 .enum_("minePickUp", "Pick up the drops", PickUpChoice.class, PickUpChoice.AT_END,
                         v -> pickUp = v.mode)
@@ -138,6 +140,10 @@ public class AutoMinerModule implements ProxyModule {
                     note = "";
                 })
                 .liveText("Chest", () -> chest == null ? "None chosen." : chest.x() + " " + chest.y() + " " + chest.z())
+                .bool("mineShowTarget", "Outline the block being dug", showTarget, v -> {
+                    showTarget = v;
+                    miner.showTarget(v);
+                })
                 .button("Mine", () -> mine(miner, selection))
                 .button("Stop", () -> {
                     note = "";
@@ -161,7 +167,7 @@ public class AutoMinerModule implements ProxyModule {
             return;
         }
         if (mode == MineMode.BLOCKS) {
-            miner.mine(name, count, radius, options());
+            miner.mine(name, count, options());
             return;
         }
         BlockBox box = box(selection);
@@ -196,6 +202,7 @@ public class AutoMinerModule implements ProxyModule {
                 pickUp = switch (value) {
                     case "none" -> AutoMiner.PickUp.NONE;
                     case "every" -> AutoMiner.PickUp.EVERY;
+                    case "all" -> AutoMiner.PickUp.ALL;
                     default -> AutoMiner.PickUp.AT_END;
                 };
                 if (pickUp == AutoMiner.PickUp.EVERY && args.size() > 3) {
@@ -227,7 +234,7 @@ public class AutoMinerModule implements ProxyModule {
         return CompletableFuture.completedFuture(out);
     }
 
-    /** {@code box <x y z x y z> | selection | blocks <name> [count] [radius] | cancel | set ...}. */
+    /** {@code box <x y z x y z> | selection | blocks <name> [count] | cancel | set ...}. */
     private CompletableFuture<?> command(AutoMiner miner, BuilderSelection selection, List<String> args) {
         String how = args.isEmpty() ? "" : args.get(0).toLowerCase(Locale.ROOT);
         if (how.equals("set")) {
@@ -259,9 +266,8 @@ public class AutoMinerModule implements ProxyModule {
                 if (args.size() < 2) {
                     throw new IllegalArgumentException(USAGE);
                 }
-                int n = args.size() > 2 ? Integer.parseInt(args.get(2)) : 16;
-                double r = args.size() > 3 ? Double.parseDouble(args.get(3)) : 24;
-                yield miner.mine(args.get(1), n, r, options());
+                int n = args.size() > 2 ? Integer.parseInt(args.get(2)) : -1;
+                yield miner.mine(args.get(1), n, options());
             }
             default -> throw new IllegalArgumentException(USAGE);
         };

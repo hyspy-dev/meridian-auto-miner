@@ -34,6 +34,10 @@ final class AutoMiner {
 
     /** The most blocks of a kind the search looks at in one go. */
     static final int FIND_LIMIT = 512;
+    /** Blocks of a kind are looked for this far round where the body is: about what the game has loaded. */
+    static final double SEARCH = 48.0;
+    /** The id of the box that outlines the block being dug ({@link meridian.core.api.DebugRender#worldBox}). */
+    static final String TARGET_BOX = "meridian-auto-miner:target";
     /**
      * The next block is the one cheapest to go on to: its distance from the eyes, plus this many
      * blocks for each radian the head turns to it - a quarter turn costs as much as 8 blocks, so the
@@ -49,6 +53,10 @@ final class AutoMiner {
     static final int MAX_DIGS_AT = 3;
     /** Drops are looked for this far around what was broken. */
     static final int DROP_AROUND = 4;
+    /** An item first seen this near a broken block's middle is that block's drop. */
+    static final double DROP_FROM = 1.5;
+    /** The longest the last block's drop is waited for before the drops are picked up. */
+    static final long SETTLE_MS = 800;
     /** A chest to unload into is looked for this far from the body. */
     static final double CHEST_AROUND = 32;
     /** The most chests tried in one unloading. */
@@ -63,7 +71,13 @@ final class AutoMiner {
         /** Once everything is dug. */
         AT_END,
         /** Whenever {@link Options#every} items lie about, and the rest at the end. */
-        EVERY
+        EVERY,
+        /**
+         * Once everything is dug: every item the job dropped, wherever it went since - rolled, fell
+         * down a hole, floated off - not only those still about what was broken. Items that lay
+         * there before are left.
+         */
+        ALL
     }
 
     /** Where what the job dug goes. */
@@ -126,7 +140,9 @@ final class AutoMiner {
     private volatile String status = "Idle.";
 
     AutoMiner(Movement movement, World world, Worker worker, meridian.core.api.PlayerState inventory,
-              meridian.core.api.EntityTracker entities, Executor executor, Logger log) {
+              meridian.core.api.EntityTracker entities, meridian.core.api.DebugRender debug, Executor executor,
+              Logger log) {
+        this.debug = debug;
         this.movement = movement;
         this.world = world;
         this.worker = worker;
@@ -135,6 +151,10 @@ final class AutoMiner {
         this.executor = executor;
         this.log = log;
     }
+
+    /** Outlines the block being dug; {@code null} where core does not draw - then nothing is outlined. */
+    private final meridian.core.api.DebugRender debug;
+    private volatile boolean showTarget = true;
 
     String status() {
         return status;
@@ -155,17 +175,18 @@ final class AutoMiner {
     }
 
     /**
-     * Digs up to {@code count} blocks whose name holds {@code name}, within {@code radius} of where
-     * the body stands now, nearest first.
+     * Digs {@code count} blocks whose name holds {@code name} - with {@code count} under 1, as long
+     * as there are any - each looked for round where the body is then ({@link #SEARCH}), the one
+     * cheapest to go on to first.
      */
-    CompletableFuture<Result> mine(String name, int count, double radius, Options options) {
+    CompletableFuture<Result> mine(String name, int count, Options options) {
         if (name == null || name.isBlank()) {
             status = "Say which blocks: a part of their name, like Ore_Copper.";
             return CompletableFuture.completedFuture(new Result(Status.NOTHING, 0, 0, 0, 0, 0));
         }
         Vec3 from = movement.position();
         Predicate<BlockView> type = t -> t.name() != null && t.name().contains(name);
-        return start(new Job(job.incrementAndGet(), null, name, type, Math.max(1, count), radius, from, options));
+        return start(new Job(job.incrementAndGet(), null, name, type, count < 1 ? -1 : count, SEARCH, from, options));
     }
 
     /** Ends the job under way; completes once it has ended and given the body back. */
@@ -227,6 +248,10 @@ final class AutoMiner {
         int picked;
         /** The worker was stopped under it - the player took the body, or a Go or Stop. */
         boolean stopped;
+        /** The items on the ground core saw when it started: not the job's drops. */
+        final Set<Integer> lying = new HashSet<>();
+        /** The items the job dropped: first seen beside a block it broke. */
+        final Set<Integer> drops = new HashSet<>();
 
         Job(int id, BlockBox box, String name, Predicate<BlockView> type, int count, double radius, Vec3 from,
             Options options) {
@@ -258,6 +283,13 @@ final class AutoMiner {
         try {
             int found = 0;
             j.start = carried();
+            if (entities != null) {
+                for (int e : entities.trackedEntities()) {
+                    if (entities.itemOf(e).isPresent()) {
+                        j.lying.add(e);
+                    }
+                }
+            }
             Worker.Access access = j.box != null ? Worker.Access.inside(j.box) : Worker.Access.ANY;
             Worker.Tools tools = j.options.tools();
             while (j.live()) {
@@ -275,8 +307,10 @@ final class AutoMiner {
                     continue;
                 }
                 status = progress(j, "digging " + text(at));
+                mark(at);
                 Worker.Dug d = worker.dig(at, access, tools).get(10, TimeUnit.MINUTES);
                 j.broken.addAll(d.broken());
+                claim(j);
                 switch (d.outcome()) {
                     case BROKEN -> j.dug++;
                     case INTERRUPTED, NOT_AVAILABLE -> j.stopped = true;
@@ -291,6 +325,13 @@ final class AutoMiner {
                 }
             }
             if (j.live() && !j.broken.isEmpty() && j.options.pickUp() != PickUp.NONE) {
+                settle(j);
+            }
+            if (j.live() && !j.broken.isEmpty() && j.options.pickUp() == PickUp.ALL) {
+                claim(j);
+                status = progress(j, "picking up all it dropped");
+                j.picked += worker.pickUp(j.drops).get(10, TimeUnit.MINUTES);
+            } else if (j.live() && !j.broken.isEmpty() && j.options.pickUp() != PickUp.NONE) {
                 pickUp(j);
             }
             if (j.live() && j.options.unload() != Unload.OFF) {
@@ -299,7 +340,85 @@ final class AutoMiner {
             Status s = !j.live() ? Status.INTERRUPTED : found == 0 ? Status.NOTHING : Status.DONE;
             return new Result(s, j.broken.size(), j.dug, j.skipped.size(), j.picked, left(j), j.unloaded);
         } finally {
+            unmark();
             wheel.release();
+        }
+    }
+
+    /** Whether the block being dug is outlined. */
+    void showTarget(boolean on) {
+        showTarget = on;
+        if (!on) {
+            unmark();
+        }
+    }
+
+    /** Outlines the block the job goes to dig now, seen through walls. */
+    private void mark(BlockPos p) {
+        if (debug != null && showTarget) {
+            debug.worldBox(TARGET_BOX, p.x() + 0.5, p.y() + 0.5, p.z() + 0.5, 1.02, 1.02, 1.02, 1f, 0.55f, 0.1f, 0.35f);
+        }
+    }
+
+    private void unmark() {
+        if (debug != null) {
+            debug.clearWorldBox(TARGET_BOX);
+        }
+    }
+
+    /**
+     * Waits for the last block's drop to show: the server sends it a moment after the block goes, and
+     * a round of picking up straight after would not see it. Done once an item shows by that block,
+     * or after {@link #SETTLE_MS}.
+     */
+    private void settle(Job j) throws InterruptedException {
+        if (entities == null) {
+            return;
+        }
+        BlockPos last = j.broken.get(j.broken.size() - 1);
+        for (long waited = 0; waited < SETTLE_MS; waited += 50) {
+            for (int e : entities.trackedEntities()) {
+                if (j.lying.contains(e) || entities.itemOf(e).isEmpty()) {
+                    continue;
+                }
+                Vec3 first = entities.firstSeenAt(e).orElse(entities.positionOf(e).orElse(null));
+                if (first != null && Math.abs(first.x() - (last.x() + 0.5)) <= DROP_FROM
+                        && Math.abs(first.y() - (last.y() + 0.5)) <= DROP_FROM
+                        && Math.abs(first.z() - (last.z() + 0.5)) <= DROP_FROM) {
+                    return;
+                }
+            }
+            Thread.sleep(50);
+        }
+    }
+
+    /**
+     * Takes as the job's the items that came since it started and were first seen by a block it broke
+     * (a block's drop shows up in or by its cell) - wherever they are now.
+     */
+    private void claim(Job j) {
+        if (entities == null || j.broken.isEmpty()) {
+            return;
+        }
+        BlockBox near = area(j.broken).grow(1);
+        for (int e : entities.trackedEntities()) {
+            if (j.lying.contains(e) || j.drops.contains(e) || entities.itemOf(e).isEmpty()) {
+                continue;
+            }
+            Vec3 first = entities.firstSeenAt(e).orElse(null);
+            if (first == null || !near.contains((int) Math.floor(first.x()), (int) Math.floor(first.y()),
+                    (int) Math.floor(first.z()))) {
+                continue;
+            }
+            for (BlockPos b : j.broken) {
+                double dx = first.x() - (b.x() + 0.5);
+                double dy = first.y() - (b.y() + 0.5);
+                double dz = first.z() - (b.z() + 0.5);
+                if (dx * dx + dy * dy + dz * dz <= DROP_FROM * DROP_FROM) {
+                    j.drops.add(e);
+                    break;
+                }
+            }
         }
     }
 
@@ -428,12 +547,12 @@ final class AutoMiner {
             look = st == null ? null : new meridian.core.api.Look(st.yaw(), st.pitch()).direction();
         }
         if (j.box == null) {
-            if (j.dug >= j.count) {
+            if (j.count > 0 && j.dug >= j.count) {
                 return null;
             }
             Block best = null;
             double bestD = Double.MAX_VALUE;
-            for (Block b : world.find(j.from, j.radius, j.type, FIND_LIMIT)) {
+            for (Block b : world.find(me, j.radius, j.type, FIND_LIMIT)) {
                 BlockPos p = new BlockPos(b.x(), b.y(), b.z());
                 if (j.skipped.contains(p)) {
                     continue;
@@ -477,7 +596,7 @@ final class AutoMiner {
     /** How many of the blocks it came for are still there. */
     private int left(Job j) {
         if (j.box == null) {
-            return Math.max(0, j.count - j.dug);
+            return j.count > 0 ? Math.max(0, j.count - j.dug) : 0;
         }
         int n = 0;
         BlockBox box = j.box;
@@ -540,7 +659,8 @@ final class AutoMiner {
     }
 
     private static String progress(Job j, String doing) {
-        String what = j.box != null ? "the selection" : j.dug + " of " + j.count + " " + j.name;
+        String what = j.box != null ? "the selection"
+                : j.count > 0 ? j.dug + " of " + j.count + " " + j.name : j.dug + " " + j.name;
         return "Mining " + what + ": " + j.broken.size() + " broken, " + j.skipped.size() + " left behind - " + doing
                 + ".";
     }
@@ -548,15 +668,17 @@ final class AutoMiner {
     private static String describe(Job j, Result r) {
         String head = switch (r.status()) {
             case DONE -> "Done";
-            case NOTHING -> j.box != null ? "Nothing to dig in the selection" : "No " + j.name + " within " + (int) j.radius;
+            case NOTHING -> j.box != null ? "Nothing to dig in the selection" : "No " + j.name + " about";
             case INTERRUPTED -> "Stopped";
             case NOT_AVAILABLE -> "Cannot move the player here";
         };
         if (r.status() == Status.NOTHING || r.status() == Status.NOT_AVAILABLE) {
             return head + ".";
         }
-        return String.format(Locale.ROOT, "%s: %d broken (%d asked for), %d left behind, %d drop(s) picked up%s%s.",
-                head, r.broken(), r.dug(), r.skipped(), r.picked(), r.unloaded() > 0 ? ", " + r.unloaded()
-                        + " item(s) into chests" : "", r.left() > 0 ? ", " + r.left() + " still there" : "");
+        int inTheWay = Math.max(0, r.broken() - r.dug());
+        return String.format(Locale.ROOT, "%s: %d dug%s, %d left behind, %d drop(s) picked up%s%s.",
+                head, r.dug(), inTheWay > 0 ? " and " + inTheWay + " in the way" : "", r.skipped(), r.picked(),
+                r.unloaded() > 0 ? ", " + r.unloaded() + " item(s) into chests" : "",
+                r.left() > 0 ? ", " + r.left() + " still to dig" : "");
     }
 }
