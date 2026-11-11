@@ -74,7 +74,7 @@ mine <conn> set unload off|nearest|chest <x y z>
 
 ## Not yet
 
-- **Tunnels.** A block deeper in the rock than a tool reaches from open ground is left behind.
+- **Long tunnels.** A tunnel to a block is 48 moves at most; a block farther in is left behind.
 - **A full inventory with no chest to unload into.** Mining goes on, and its drops stay on the
   ground.
 - **A pit deeper than the body climbs out of** (3 blocks). It is dug, and the body stays in it.

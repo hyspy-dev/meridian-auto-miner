@@ -45,6 +45,8 @@ final class AutoMiner {
      * looks, not round and round again for each ring.
      */
     static final double PER_RADIAN = 5.0;
+    /** Past this far from the eyes the turn of the head weighs less, by the distance. */
+    static final double TURN_NEAR = 6.0;
     /** A block beside the one broken last comes this much nearer: a player digs on from where they dug. */
     static final double BESIDE = 1.5;
     /** The largest box dug. */
@@ -310,6 +312,11 @@ final class AutoMiner {
                 mark(at);
                 Worker.Dug d = worker.dig(at, access, tools).get(10, TimeUnit.MINUTES);
                 j.broken.addAll(d.broken());
+                if (j.options.pickUp() == PickUp.ALL && !d.broken().isEmpty()) {
+                    // Its drop taken as the job's while it is still in sight: once the body has
+                    // gone on and it is out of view, it comes back as an item like any other.
+                    settle(j);
+                }
                 claim(j);
                 switch (d.outcome()) {
                     case BROKEN -> j.dug++;
@@ -644,8 +651,10 @@ final class AutoMiner {
         double d = Math.sqrt(dx * dx + dy * dy + dz * dz);
         double c = d;
         if (look != null && d > 1e-6) {
+            // The turn of the head weighs in full for a block within reach; going on to one farther,
+            // the walk there is what counts.
             double dot = (look.x() * dx + look.y() * dy + look.z() * dz) / d;
-            c += PER_RADIAN * Math.acos(Math.max(-1, Math.min(1, dot)));
+            c += PER_RADIAN * Math.min(1, TURN_NEAR / d) * Math.acos(Math.max(-1, Math.min(1, dot)));
         }
         if (last != null && !last.equals(p) && Math.abs(last.x() - p.x()) <= 1 && Math.abs(last.y() - p.y()) <= 1
                 && Math.abs(last.z() - p.z()) <= 1) {
