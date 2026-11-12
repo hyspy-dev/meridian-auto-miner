@@ -255,8 +255,13 @@ final class AutoMiner {
         final Set<Integer> lying = new HashSet<>();
         /** The items the job dropped: first seen beside a block it broke. */
         final Set<Integer> drops = new HashSet<>();
-        /** A box's order of digging ({@link #plan}), worked out at its first block. */
+        /** A box's order of digging ({@link #plan}), worked out at its first block, and each block's place in it. */
         List<BlockPos> plan;
+        Map<BlockPos, Integer> planned;
+        /** The block the job went for last - what the next is looked for beside. */
+        BlockPos target;
+        /** Whether the plan's rows run along x ({@link #rowsAlongX}). */
+        boolean alongX;
 
         Job(int id, BlockBox box, String name, Predicate<BlockView> type, int count, double radius, Vec3 from,
             Options options) {
@@ -312,6 +317,7 @@ final class AutoMiner {
                     continue;
                 }
                 status = progress(j, "digging " + text(at));
+                j.target = at;
                 mark(at);
                 Worker.Dug d = worker.dig(at, access, tools).get(10, TimeUnit.MINUTES);
                 j.broken.addAll(d.broken());
@@ -560,9 +566,30 @@ final class AutoMiner {
             if (j.count > 0 && j.dug >= j.count) {
                 return null;
             }
+            List<Block> found = world.find(me, j.radius, j.type, FIND_LIMIT);
+            // First what touches the block gone for last and is dug from where the body stands -
+            // the nearest of those: on along the vein, no step.
+            Block beside = null;
+            double besideD = Double.MAX_VALUE;
+            if (j.target != null) {
+                for (Block b : found) {
+                    BlockPos p = new BlockPos(b.x(), b.y(), b.z());
+                    if (j.skipped.contains(p) || !touches(j.target, p)) {
+                        continue;
+                    }
+                    double d = distance(eye, p);
+                    if (d < besideD && worker.digsFromHere(p, Worker.Access.ANY, j.options.tools())) {
+                        besideD = d;
+                        beside = b;
+                    }
+                }
+            }
+            if (beside != null) {
+                return beside;
+            }
             Block best = null;
             double bestD = Double.MAX_VALUE;
-            for (Block b : world.find(me, j.radius, j.type, FIND_LIMIT)) {
+            for (Block b : found) {
                 BlockPos p = new BlockPos(b.x(), b.y(), b.z());
                 if (j.skipped.contains(p)) {
                     continue;
@@ -575,17 +602,94 @@ final class AutoMiner {
             }
             return best;
         }
-        // A box goes by its plan, worked out once: the first block of it still there.
+        // A box goes by its plan, worked out once: the first block of it still there...
         if (j.plan == null) {
             j.plan = plan(j.box, me);
+            j.alongX = rowsAlongX(j.box, me);
+            j.planned = new HashMap<>();
+            for (int i = 0; i < j.plan.size(); i++) {
+                j.planned.put(j.plan.get(i), i);
+            }
         }
+        BlockBox box = j.box;
+        Block planned = null;
         for (BlockPos p : j.plan) {
             Block b = left(j, p.x(), p.y(), p.z());
             if (b != null) {
-                return b;
+                planned = b;
+                break;
             }
         }
-        return null;
+        if (planned == null || j.target == null) {
+            return planned;
+        }
+        // Gone on from the block broken last - what the job went for, or one the worker broke in the
+        // way to it: where the digging is now.
+        BlockPos prev = last != null ? last : j.target;
+        int band = band(box, planned.y());
+        // ... but first the block under the one gone for last, in its band: a column is finished.
+        if (band(box, prev.y() - 1) == band && box.contains(prev.x(), prev.y() - 1, prev.z())) {
+            Block under = left(j, prev.x(), prev.y() - 1, prev.z());
+            if (under != null) {
+                return under;
+            }
+        }
+        // The plan's next touching it: on along the row - a step along it is how a row is dug.
+        BlockPos next = new BlockPos(planned.x(), planned.y(), planned.z());
+        if (touches(prev, next)) {
+            return planned;
+        }
+        // The plan jumps along its row (a block left behind, one broken in the way): first, of the row
+        // being dug, what touches the block gone for last and is dug from where the body stands, its
+        // column above it dug - no step for it. Of those the one the plan takes first. Not one of the
+        // next row: that would leave holes behind and come back for them.
+        int row = j.alongX ? planned.z() : planned.x();
+        Block beside = null;
+        int besideAt = Integer.MAX_VALUE;
+        Worker.Access access = Worker.Access.inside(box);
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    int x = prev.x() + dx;
+                    int y = prev.y() + dy;
+                    int z = prev.z() + dz;
+                    if ((dx == 0 && dy == 0 && dz == 0) || !box.contains(x, y, z) || band(box, y) != band
+                            || (j.alongX ? z : x) != row) {
+                        continue;
+                    }
+                    Block b = left(j, x, y, z);
+                    if (b == null || (y < box.yMax() && left(j, x, y + 1, z) != null)) {
+                        continue;
+                    }
+                    BlockPos p = new BlockPos(x, y, z);
+                    int at = j.planned.getOrDefault(p, Integer.MAX_VALUE);
+                    if (at < besideAt && worker.digsFromHere(p, access, j.options.tools())) {
+                        besideAt = at;
+                        beside = b;
+                    }
+                }
+            }
+        }
+        return beside != null ? beside : planned;
+    }
+
+    /** Which band of the box (see {@link #plan}) a height is in: 0 the top one. */
+    private static int band(BlockBox box, int y) {
+        return Math.floorDiv(box.yMax() - y, BAND);
+    }
+
+    /** Whether two blocks touch: one of the 26 around the other. */
+    private static boolean touches(BlockPos a, BlockPos b) {
+        return !a.equals(b) && Math.abs(a.x() - b.x()) <= 1 && Math.abs(a.y() - b.y()) <= 1
+                && Math.abs(a.z() - b.z()) <= 1;
+    }
+
+    /** From the eyes to a block's middle. */
+    private static double distance(Vec3 eye, BlockPos p) {
+        double dx = p.x() + 0.5 - eye.x();
+        double dy = p.y() + 0.5 - eye.y();
+        double dz = p.z() + 0.5 - eye.z();
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
 
     /** A box is dug in bands this high, from its top: a body's height, what a player digs standing. */
@@ -602,11 +706,7 @@ final class AutoMiner {
      * at, nothing of the box in between.
      */
     static List<BlockPos> plan(BlockBox box, Vec3 from) {
-        // The front goes away from the side the body is out of the box at; from inside (or over
-        // it), rows along its longer side.
-        double outX = from == null ? 0 : outside(from.x(), box.xMin(), box.xMax());
-        double outZ = from == null ? 0 : outside(from.z(), box.zMin(), box.zMax());
-        boolean alongX = outX == outZ ? box.xMax() - box.xMin() >= box.zMax() - box.zMin() : outZ > outX;
+        boolean alongX = rowsAlongX(box, from);
         int lMin = alongX ? box.xMin() : box.zMin();
         int lMax = alongX ? box.xMax() : box.zMax();
         int sMin = alongX ? box.zMin() : box.xMin();
@@ -637,6 +737,16 @@ final class AutoMiner {
             sUp = !sUp;
         }
         return out;
+    }
+
+    /**
+     * Whether the plan's rows run along x (else along z): the front goes away from the side the body
+     * is out of the box at; from inside (or over it), rows along the box's longer side.
+     */
+    static boolean rowsAlongX(BlockBox box, Vec3 from) {
+        double outX = from == null ? 0 : outside(from.x(), box.xMin(), box.xMax());
+        double outZ = from == null ? 0 : outside(from.z(), box.zMin(), box.zMax());
+        return outX == outZ ? box.xMax() - box.xMin() >= box.zMax() - box.zMin() : outZ > outX;
     }
 
     /** How far {@code v} is outside the cells {@code min..max} along one axis; 0 inside. */
