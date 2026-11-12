@@ -150,6 +150,13 @@ public class AutoMinerModule implements ProxyModule {
                     miner.cancel();
                 })
                 .liveText("Mining", () -> note.isEmpty() ? miner.status() : note);
+        // Kept across restarts, every choice of the panel: saved values come back through the same
+        // setters at the start.
+        spec.persistent("mineMode", "mineName", "mineCount", "mineShovel", "minePickUp", "minePickUpEvery",
+                "mineUnload", "mineShowTarget");
+        if (selection != null) {
+            spec.persistent("selectionTool");
+        }
         ctx.registerSettings(spec.build());
         ctx.getLogger().info("meridian-auto-miner enabled");
     }
