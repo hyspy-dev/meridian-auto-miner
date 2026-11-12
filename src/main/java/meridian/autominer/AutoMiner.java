@@ -578,6 +578,15 @@ final class AutoMiner {
         // any layer, whose column above it in the box is dug - head high, then at the feet, column
         // by column along it, as a player digs. Not the whole top layer first, walking round it.
         int feet = (int) Math.floor(me.y() + 1e-6);
+        // The column just begun is finished first: the block under the one broken last, when it
+        // is the box's and still there - 1 top, 1 bottom, 2 top, 2 bottom. By distance alone the next
+        // column's top would win: at the eyes' height it is nearer them than a block at the feet.
+        if (last != null && box.contains(last.x(), last.y() - 1, last.z()) && last.y() - 1 >= feet) {
+            Block under = left(j, last.x(), last.y() - 1, last.z());
+            if (under != null) {
+                return under;
+            }
+        }
         Block best = null;
         double bestD = Double.MAX_VALUE;
         for (int y = box.yMax(); y >= Math.max(box.yMin(), feet); y--) {
