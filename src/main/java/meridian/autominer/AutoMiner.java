@@ -23,7 +23,8 @@ import meridian.core.api.World;
 import org.slf4j.Logger;
 
 /**
- * What to dig, and in what order: a box out, top layer first, or the blocks of a kind around where
+ * What to dig, and in what order: a box out (nearest first at the body's height, a layer at a time
+ * below its feet), or the blocks of a kind around where
  * it started, nearest first. Each block is core's {@link Worker}'s to get at and break - with a
  * shovel for soil, if asked. The drops around what was broken are picked up as {@link Options}
  * says, and what the job dug is put into a chest when the inventory is full and at the end, if
@@ -167,7 +168,7 @@ final class AutoMiner {
         return !running.isDone();
     }
 
-    /** Digs out the box, top layer first, inside itself only. */
+    /** Digs out the box, inside itself only: nearest first at the body's height, down a layer at a time. */
     CompletableFuture<Result> mine(BlockBox box, Options options) {
         if (box.volume() > MAX_BOX) {
             status = "The selection is too big: " + box.volume() + " blocks, at most " + MAX_BOX + ".";
@@ -533,8 +534,8 @@ final class AutoMiner {
     }
 
     /**
-     * The next block to dig, or {@code null} when none is left: of the top layer left (or of the
-     * blocks of the kind), the one cheapest to go on to - near the eyes, little turn of the head from
+     * The next block to dig, or {@code null} when none is left: of the box's blocks that may go
+     * next (see the box's part below) or of the blocks of the kind, the one cheapest to go on to - near the eyes, little turn of the head from
      * where it looks, beside the block broken last ({@link #cost}). The way a player digs, block by
      * block, not swinging round to a block behind them.
      */
@@ -573,20 +574,40 @@ final class AutoMiner {
             return best;
         }
         BlockBox box = j.box;
-        for (int y = box.yMax(); y >= box.yMin(); y--) {
-            Block best = null;
-            double bestD = Double.MAX_VALUE;
+        // At the body's height and over it - a slice, a wall, a way through: the nearest block, of
+        // any layer, whose column above it in the box is dug - head high, then at the feet, column
+        // by column along it, as a player digs. Not the whole top layer first, walking round it.
+        int feet = (int) Math.floor(me.y() + 1e-6);
+        Block best = null;
+        double bestD = Double.MAX_VALUE;
+        for (int y = box.yMax(); y >= Math.max(box.yMin(), feet); y--) {
             for (int x = box.xMin(); x <= box.xMax(); x++) {
                 for (int z = box.zMin(); z <= box.zMax(); z++) {
-                    BlockPos p = new BlockPos(x, y, z);
-                    if (j.skipped.contains(p) || !world.known(x, y, z)) {
+                    Block b = left(j, x, y, z);
+                    if (b == null || (y < box.yMax() && left(j, x, y + 1, z) != null)) {
                         continue;
                     }
-                    Block b = world.blockAt(x, y, z);
-                    if (b.isAir()) {
+                    double d = cost(eye, look, last, new BlockPos(x, y, z));
+                    if (d < bestD) {
+                        bestD = d;
+                        best = b;
+                    }
+                }
+            }
+        }
+        if (best != null) {
+            return best;
+        }
+        // Under the feet - digging down: a layer at a time, top first, the nearest of it. A pit
+        // dug column by column would leave the body among shafts.
+        for (int y = Math.min(box.yMax(), feet - 1); y >= box.yMin(); y--) {
+            for (int x = box.xMin(); x <= box.xMax(); x++) {
+                for (int z = box.zMin(); z <= box.zMax(); z++) {
+                    Block b = left(j, x, y, z);
+                    if (b == null) {
                         continue;
                     }
-                    double d = cost(eye, look, last, p);
+                    double d = cost(eye, look, last, new BlockPos(x, y, z));
                     if (d < bestD) {
                         bestD = d;
                         best = b;
@@ -598,6 +619,15 @@ final class AutoMiner {
             }
         }
         return null;
+    }
+
+    /** The box's block at a cell still to dig - known, not air, not left behind - or {@code null}. */
+    private Block left(Job j, int x, int y, int z) {
+        if (j.skipped.contains(new BlockPos(x, y, z)) || !world.known(x, y, z)) {
+            return null;
+        }
+        Block b = world.blockAt(x, y, z);
+        return b.isAir() ? null : b;
     }
 
     /** How many of the blocks it came for are still there. */
