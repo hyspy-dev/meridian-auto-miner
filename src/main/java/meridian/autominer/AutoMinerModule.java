@@ -97,6 +97,11 @@ public class AutoMinerModule implements ProxyModule {
     private volatile int every = 20;
     private volatile AutoMiner.Unload unload = AutoMiner.Unload.OFF;
     private volatile meridian.core.api.BlockPos chest;
+    /** Repair a broken tool with a kit from the hotbar before digging on. */
+    private volatile boolean repair;
+    /** The selection last seen, kept in the module's data folder: it outlives the session. */
+    private volatile BlockBox kept;
+    private java.nio.file.Path keptFile;
 
     @Override
     public void onEnable(ModuleContext ctx) {
@@ -109,8 +114,19 @@ public class AutoMinerModule implements ProxyModule {
         AutoMiner miner = new AutoMiner(movement, world, worker,
                 ctx.services().get(meridian.core.api.PlayerState.class).orElse(null),
                 ctx.services().get(meridian.core.api.EntityTracker.class).orElse(null),
-                ctx.services().get(meridian.core.api.DebugRender.class).orElse(null), ctx.offloadExecutor(),
+                ctx.services().get(meridian.core.api.DebugRender.class).orElse(null),
+                ctx.services().get(meridian.core.api.InteractionControl.class).orElse(null), ctx.offloadExecutor(),
                 ctx.getLogger());
+        keptFile = ctx.getDataDir().resolve("selection.txt");
+        kept = readKept(keptFile);
+        if (selection != null) {
+            selection.onSelection(b -> {
+                if (b != null) {
+                    kept = BlockBox.of(b.xMin(), b.yMin(), b.zMin(), b.xMax(), b.yMax(), b.zMax());
+                    writeKept(keptFile, kept);
+                }
+            });
+        }
         try {
             ctx.registerCommand("mine", USAGE, (args, json) -> command(miner, selection, args));
         } catch (NoSuchMethodError olderProxy) {
@@ -120,12 +136,13 @@ public class AutoMinerModule implements ProxyModule {
         if (selection != null) {
             spec.bool("selectionTool", "Selection tool in slot 1", false, on -> selection.forceTools(
                             on ? List.of(BuilderSelection.SELECTION_TOOL) : List.of()))
-                    .liveText("Selection", () -> describe(selection.current().orElse(null)));
+                    .liveText("Selection", () -> describe(selection.current().orElse(null), kept));
         }
         spec.enum_("mineMode", "What to mine", MineMode.class, MineMode.SELECTION, v -> mode = v)
                 .string("mineName", "Blocks (a part of the name)", name, v -> name = v == null ? "" : v.trim())
                 .int_("mineCount", "How many to dig (-1: no end)", -1, 100000, count, v -> count = v)
                 .bool("mineShovel", "Shovel for dirt, gravel and sand", shovel, v -> shovel = v)
+                .bool("mineRepair", "Repair a broken tool with a kit from the hotbar", repair, v -> repair = v)
                 .enum_("minePickUp", "Pick up the drops", PickUpChoice.class, PickUpChoice.AT_END,
                         v -> pickUp = v.mode)
                 .int_("minePickUpEvery", "... whenever this many lie about", 1, 1000, every, v -> every = v)
@@ -153,17 +170,17 @@ public class AutoMinerModule implements ProxyModule {
         // Kept across restarts, every choice of the panel: saved values come back through the same
         // setters at the start.
         spec.persistent("mineMode", "mineName", "mineCount", "mineShovel", "minePickUp", "minePickUpEvery",
-                "mineUnload", "mineShowTarget");
+                "mineUnload", "mineShowTarget", "mineRepair");
         if (selection != null) {
             spec.persistent("selectionTool");
         }
         ctx.registerSettings(spec.build());
-        ctx.getLogger().info("meridian-auto-miner enabled");
+        ctx.getLogger().info("meridian-auto-miner enabled{}", kept == null ? "" : " - selection kept: " + kept);
     }
 
     /** How a job goes, as the panel (or the command channel) set it. */
     private AutoMiner.Options options() {
-        return new AutoMiner.Options(shovel, pickUp, every, unload, chest);
+        return new AutoMiner.Options(shovel, pickUp, every, unload, chest, repair);
     }
 
     /** Mines what the mode says; the Mining line says how it goes. */
@@ -179,6 +196,9 @@ public class AutoMinerModule implements ProxyModule {
         }
         BlockBox box = box(selection);
         if (box == null) {
+            box = kept;                       // the one from before: a new session has none of its own yet
+        }
+        if (box == null) {
             note = "No selection - tick the selection tool, then drag a box with it in the game.";
             return;
         }
@@ -190,7 +210,11 @@ public class AutoMinerModule implements ProxyModule {
         return b == null ? null : BlockBox.of(b.xMin(), b.yMin(), b.zMin(), b.xMax(), b.yMax(), b.zMax());
     }
 
-    private static String describe(BuilderSelection.Box b) {
+    private static String describe(BuilderSelection.Box b, BlockBox kept) {
+        if (b == null && kept != null) {
+            b = new BuilderSelection.Box(kept.xMin(), kept.yMin(), kept.zMin(), kept.xMax(), kept.yMax(), kept.zMax());
+            return describe(b, null) + ", kept from before";
+        }
         if (b == null) {
             return "None - drag a box with the selection tool.";
         }
@@ -199,12 +223,43 @@ public class AutoMinerModule implements ProxyModule {
                 + n + " blocks)";
     }
 
+    /** The selection kept in {@code file}: six numbers; {@code null} when there is none. */
+    private static BlockBox readKept(java.nio.file.Path file) {
+        try {
+            if (!java.nio.file.Files.isRegularFile(file)) {
+                return null;
+            }
+            String[] v = java.nio.file.Files.readString(file).trim().split("\\s+");
+            if (v.length != 6) {
+                return null;
+            }
+            int[] n = new int[6];
+            for (int i = 0; i < 6; i++) {
+                n[i] = Integer.parseInt(v[i]);
+            }
+            return BlockBox.of(n[0], n[1], n[2], n[3], n[4], n[5]);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static void writeKept(java.nio.file.Path file, BlockBox b) {
+        try {
+            java.nio.file.Files.createDirectories(file.getParent());
+            java.nio.file.Files.writeString(file, b.xMin() + " " + b.yMin() + " " + b.zMin() + " " + b.xMax() + " "
+                    + b.yMax() + " " + b.zMax());
+        } catch (Exception e) {
+            // a selection not kept is only one to drag again
+        }
+    }
+
     /** {@code set shovel on|off | set pickup none|end|every <n> | set unload off|nearest|chest <x y z>}. */
     private CompletableFuture<?> set(List<String> args) {
         String what = args.size() > 1 ? args.get(1).toLowerCase(Locale.ROOT) : "";
         String value = args.size() > 2 ? args.get(2).toLowerCase(Locale.ROOT) : "";
         switch (what) {
             case "shovel" -> shovel = value.equals("on") || value.equals("true");
+            case "repair" -> repair = value.equals("on") || value.equals("true");
             case "pickup" -> {
                 pickUp = switch (value) {
                     case "none" -> AutoMiner.PickUp.NONE;

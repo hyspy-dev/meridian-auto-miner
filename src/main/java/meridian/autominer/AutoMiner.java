@@ -103,9 +103,13 @@ final class AutoMiner {
      * @param unload where what the job dug goes, when the inventory is full and at the end
      * @param chest  with {@link Unload#CHOSEN}, the chest
      */
-    record Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest) {
+    record Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest, boolean repair) {
 
-        static final Options DEFAULT = new Options(true, PickUp.AT_END, 20, Unload.OFF, null);
+        static final Options DEFAULT = new Options(true, PickUp.AT_END, 20, Unload.OFF, null, false);
+
+        Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest) {
+            this(shovel, pickUp, every, unload, chest, false);
+        }
 
         Worker.Tools tools() {
             return shovel ? new Worker.Tools(Map.of("Soils", "Shovel")) : Worker.Tools.BEST;
@@ -145,6 +149,13 @@ final class AutoMiner {
     AutoMiner(Movement movement, World world, Worker worker, meridian.core.api.PlayerState inventory,
               meridian.core.api.EntityTracker entities, meridian.core.api.DebugRender debug, Executor executor,
               Logger log) {
+        this(movement, world, worker, inventory, entities, debug, null, executor, log);
+    }
+
+    AutoMiner(Movement movement, World world, Worker worker, meridian.core.api.PlayerState inventory,
+              meridian.core.api.EntityTracker entities, meridian.core.api.DebugRender debug,
+              meridian.core.api.InteractionControl hands, Executor executor, Logger log) {
+        this.hands = hands;
         this.debug = debug;
         this.movement = movement;
         this.world = world;
@@ -154,6 +165,11 @@ final class AutoMiner {
         this.executor = executor;
         this.log = log;
     }
+
+    /** Repairs a tool with a kit ({@link Options#repair}); {@code null} where core does not offer it. */
+    private final meridian.core.api.InteractionControl hands;
+    /** A tool with less than this share of its durability left is broken, as far as repair goes. */
+    static final double BROKEN = 0.02;
 
     /** Outlines the block being dug; {@code null} where core does not draw - then nothing is outlined. */
     private final meridian.core.api.DebugRender debug;
@@ -258,6 +274,8 @@ final class AutoMiner {
         /** A box's order of digging ({@link #plan}), worked out at its first block, and each block's place in it. */
         List<BlockPos> plan;
         Map<BlockPos, Integer> planned;
+        /** Tools repaired with a kit. */
+        int repairs;
         /** The block the job went for last - what the next is looked for beside. */
         BlockPos target;
         /** Whether the plan's rows run along x ({@link #rowsAlongX}). */
@@ -315,6 +333,9 @@ final class AutoMiner {
                 if (j.digs.merge(at, 1, Integer::sum) > MAX_DIGS_AT) {
                     j.skipped.add(at);
                     continue;
+                }
+                if (j.options.repair()) {
+                    repairBroken(j);
                 }
                 status = progress(j, "digging " + text(at));
                 j.target = at;
@@ -620,57 +641,97 @@ final class AutoMiner {
                 break;
             }
         }
-        if (planned == null || j.target == null) {
-            return planned;
+        if (planned == null) {
+            return null;
         }
-        // Gone on from the block broken last - what the job went for, or one the worker broke in the
-        // way to it: where the digging is now.
-        BlockPos prev = last != null ? last : j.target;
         int band = band(box, planned.y());
-        // ... but first the block under the one gone for last, in its band: a column is finished.
-        if (band(box, prev.y() - 1) == band && box.contains(prev.x(), prev.y() - 1, prev.z())) {
+        // Gone on from the block broken last - what the job went for, or one the worker broke in the
+        // way to it: where the digging is now. A column is finished first: the block under it.
+        BlockPos prev = last != null ? last : j.target;
+        if (prev != null && band(box, prev.y() - 1) == band && box.contains(prev.x(), prev.y() - 1, prev.z())) {
             Block under = left(j, prev.x(), prev.y() - 1, prev.z());
             if (under != null) {
                 return under;
             }
         }
-        // The plan's next touching it: on along the row - a step along it is how a row is dug.
-        BlockPos next = new BlockPos(planned.x(), planned.y(), planned.z());
-        if (touches(prev, next)) {
-            return planned;
-        }
-        // The plan jumps along its row (a block left behind, one broken in the way): first, of the row
-        // being dug, what touches the block gone for last and is dug from where the body stands, its
-        // column above it dug - no step for it. Of those the one the plan takes first. Not one of the
-        // next row: that would leave holes behind and come back for them.
+        // The row the plan is at, top first in each column. A row just begun is begun at the end of
+        // what is left of it nearer the block broken last; a row under way goes on from the block broken
+        // last to the column nearest it. So a row is dug in one pass along it - not from the end the
+        // plan reckoned at the start, which a row half dug already, or the one before finished at its
+        // other end, would send the body running to.
         int row = j.alongX ? planned.z() : planned.x();
-        Block beside = null;
-        int besideAt = Integer.MAX_VALUE;
-        Worker.Access access = Worker.Access.inside(box);
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dz = -1; dz <= 1; dz++) {
-                    int x = prev.x() + dx;
-                    int y = prev.y() + dy;
-                    int z = prev.z() + dz;
-                    if ((dx == 0 && dy == 0 && dz == 0) || !box.contains(x, y, z) || band(box, y) != band
-                            || (j.alongX ? z : x) != row) {
-                        continue;
-                    }
-                    Block b = left(j, x, y, z);
-                    if (b == null || (y < box.yMax() && left(j, x, y + 1, z) != null)) {
-                        continue;
-                    }
-                    BlockPos p = new BlockPos(x, y, z);
-                    int at = j.planned.getOrDefault(p, Integer.MAX_VALUE);
-                    if (at < besideAt && worker.digsFromHere(p, access, j.options.tools())) {
-                        besideAt = at;
-                        beside = b;
-                    }
-                }
+        boolean going = prev != null && band(box, prev.y()) == band && (j.alongX ? prev.z() : prev.x()) == row;
+        java.util.List<BlockPos> open = new ArrayList<>();
+        int lo = Integer.MAX_VALUE;
+        int hi = Integer.MIN_VALUE;
+        for (BlockPos p : j.plan) {
+            if (band(box, p.y()) != band || (j.alongX ? p.z() : p.x()) != row || left(j, p.x(), p.y(), p.z()) == null) {
+                continue;
+            }
+            int l = j.alongX ? p.x() : p.z();
+            lo = Math.min(lo, l);
+            hi = Math.max(hi, l);
+            if (band(box, p.y() + 1) == band && box.contains(p.x(), p.y() + 1, p.z())
+                    && left(j, p.x(), p.y() + 1, p.z()) != null) {
+                continue;                     // its top first
+            }
+            open.add(p);
+        }
+        double from;
+        if (going) {
+            from = j.alongX ? prev.x() : prev.z();
+        } else {
+            // The end nearer where the digging was - the block broken last, the row before's end; the
+            // body may stand back from it. With nothing broken yet, the end nearer the body.
+            double at = prev != null ? (j.alongX ? prev.x() : prev.z()) : (j.alongX ? me.x() - 0.5 : me.z() - 0.5);
+            from = Math.abs(at - lo) <= Math.abs(at - hi) ? lo : hi;
+        }
+        Block nearest = null;
+        double best = Double.MAX_VALUE;
+        for (BlockPos p : open) {
+            double d = Math.abs((j.alongX ? p.x() : p.z()) - from);
+            if (d < best - 1e-6) {
+                best = d;
+                nearest = world.blockAt(p.x(), p.y(), p.z());
             }
         }
-        return beside != null ? beside : planned;
+        return nearest != null ? nearest : planned;
+    }
+
+    /**
+     * Repairs, with a kit from the hotbar (core's {@code InteractionControl.repair}), each tool in the
+     * hotbar that is broken - or all but: under {@link #BROKEN} of its durability left. Nothing without
+     * a kit.
+     */
+    private void repairBroken(Job j) {
+        if (hands == null || inventory == null) {
+            return;
+        }
+        meridian.core.api.PlayerState.Section hotbar = inventory.inventories().get("Hotbar");
+        if (hotbar == null) {
+            return;
+        }
+        boolean kit = hotbar.items().values().stream().anyMatch(i -> i != null && i.id() != null
+                && i.id().contains("Repair_Kit"));
+        if (!kit) {
+            return;
+        }
+        for (meridian.core.api.Containers.Item item : hotbar.items().values()) {
+            if (item == null || item.id() == null || !item.id().startsWith("Tool_") || item.id().contains("Repair_Kit")
+                    || item.maxDurability() <= 0 || item.durability() / item.maxDurability() >= BROKEN) {
+                continue;
+            }
+            status = progress(j, "repairing " + item.id());
+            try {
+                boolean done = Boolean.TRUE.equals(hands.repair(item.id()).get(20, TimeUnit.SECONDS));
+                log.info("auto-miner: {} {}", item.id(), done ? "repaired with a kit" : "not repaired");
+                if (done) {
+                    j.repairs++;
+                }
+            } catch (Exception e) {
+                log.info("auto-miner: repairing {} failed: {}", item.id(), e.toString());
+            }
+        }
     }
 
     /** Which band of the box (see {@link #plan}) a height is in: 0 the top one. */

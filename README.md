@@ -17,7 +17,10 @@ is still named `meridian-navigation`: the navigation it once held is core's now.
     bands 2 blocks high from the top; in each, rows dug as a front - first the row along the side
     the body comes from, then the one behind it, each row the other way (a snake), from the corner
     nearest the body; in each column its top, then the block under it, then the next column. The
-    next band snakes back from where the one above ended.
+    next band snakes back from where the one above ended. Within a row the body goes on from the block
+    broken last; a new row is begun at the end of what is left of it nearer that block - a row half
+    dug already is not walked to its far end. The selection is kept in the module's data folder
+    (`selection.txt`): with none dragged this session, **Mine** digs the one from before.
   - **Blocks by name.** *How many to dig* blocks whose name holds the text (`Ore_Copper`); -1, the
     default, digs on as long as there are any. Each is looked for round where the body is then,
     48 blocks about: about what the game has loaded. A way the body's height is broken to a block in
@@ -40,6 +43,9 @@ is still named `meridian-navigation`: the navigation it once held is core's now.
   - **Keep it** (the default).
   - **The nearest chest with room**: chests within 32 blocks, nearest first, until all of it is in.
   - **The chosen chest**: open it in the game, then press **Choose the chest I opened last**.
+- **Repair a broken tool with a kit from the hotbar** (off): before each block, a tool in the hotbar
+  with under 2% of its durability left is repaired with a `Repair_Kit` from the hotbar, as a player
+  does (core's `InteractionControl.repair`).
 - **Outline the block being dug**, on by default: the block the job goes to dig now is outlined in
   orange, through walls (core's `DebugRender`).
 - **Mine** and **Stop**. The **Mining** line says how it goes.
