@@ -23,8 +23,8 @@ import meridian.core.api.World;
 import org.slf4j.Logger;
 
 /**
- * What to dig, and in what order: a box out (nearest first at the body's height, a layer at a time
- * below its feet), or the blocks of a kind around where
+ * What to dig, and in what order: a box out (bands 2 high from the top, a snake of rows, each
+ * column top down - see plan), or the blocks of a kind around where
  * it started, nearest first. Each block is core's {@link Worker}'s to get at and break - with a
  * shovel for soil, if asked. The drops around what was broken are picked up as {@link Options}
  * says, and what the job dug is put into a chest when the inventory is full and at the end, if
@@ -168,7 +168,7 @@ final class AutoMiner {
         return !running.isDone();
     }
 
-    /** Digs out the box, inside itself only: nearest first at the body's height, down a layer at a time. */
+    /** Digs out the box, inside itself only, by its {@link #plan}. */
     CompletableFuture<Result> mine(BlockBox box, Options options) {
         if (box.volume() > MAX_BOX) {
             status = "The selection is too big: " + box.volume() + " blocks, at most " + MAX_BOX + ".";
@@ -255,6 +255,8 @@ final class AutoMiner {
         final Set<Integer> lying = new HashSet<>();
         /** The items the job dropped: first seen beside a block it broke. */
         final Set<Integer> drops = new HashSet<>();
+        /** A box's order of digging ({@link #plan}), worked out at its first block. */
+        List<BlockPos> plan;
 
         Job(int id, BlockBox box, String name, Predicate<BlockView> type, int count, double radius, Vec3 from,
             Options options) {
@@ -534,8 +536,8 @@ final class AutoMiner {
     }
 
     /**
-     * The next block to dig, or {@code null} when none is left: of the box's blocks that may go
-     * next (see the box's part below) or of the blocks of the kind, the one cheapest to go on to - near the eyes, little turn of the head from
+     * The next block to dig, or {@code null} when none is left: a box's next by its {@link #plan};
+     * of the blocks of the kind, the one cheapest to go on to - near the eyes, little turn of the head from
      * where it looks, beside the block broken last ({@link #cost}). The way a player digs, block by
      * block, not swinging round to a block behind them.
      */
@@ -573,61 +575,73 @@ final class AutoMiner {
             }
             return best;
         }
-        BlockBox box = j.box;
-        // At the body's height and over it - a slice, a wall, a way through: the nearest block, of
-        // any layer, whose column above it in the box is dug - head high, then at the feet, column
-        // by column along it, as a player digs. Not the whole top layer first, walking round it.
-        int feet = (int) Math.floor(me.y() + 1e-6);
-        // The column just begun is finished first: the block under the one broken last, when it
-        // is the box's and still there - 1 top, 1 bottom, 2 top, 2 bottom. By distance alone the next
-        // column's top would win: at the eyes' height it is nearer them than a block at the feet.
-        if (last != null && box.contains(last.x(), last.y() - 1, last.z()) && last.y() - 1 >= feet) {
-            Block under = left(j, last.x(), last.y() - 1, last.z());
-            if (under != null) {
-                return under;
-            }
+        // A box goes by its plan, worked out once: the first block of it still there.
+        if (j.plan == null) {
+            j.plan = plan(j.box, me);
         }
-        Block best = null;
-        double bestD = Double.MAX_VALUE;
-        for (int y = box.yMax(); y >= Math.max(box.yMin(), feet); y--) {
-            for (int x = box.xMin(); x <= box.xMax(); x++) {
-                for (int z = box.zMin(); z <= box.zMax(); z++) {
-                    Block b = left(j, x, y, z);
-                    if (b == null || (y < box.yMax() && left(j, x, y + 1, z) != null)) {
-                        continue;
-                    }
-                    double d = cost(eye, look, last, new BlockPos(x, y, z));
-                    if (d < bestD) {
-                        bestD = d;
-                        best = b;
-                    }
-                }
-            }
-        }
-        if (best != null) {
-            return best;
-        }
-        // Under the feet - digging down: a layer at a time, top first, the nearest of it. A pit
-        // dug column by column would leave the body among shafts.
-        for (int y = Math.min(box.yMax(), feet - 1); y >= box.yMin(); y--) {
-            for (int x = box.xMin(); x <= box.xMax(); x++) {
-                for (int z = box.zMin(); z <= box.zMax(); z++) {
-                    Block b = left(j, x, y, z);
-                    if (b == null) {
-                        continue;
-                    }
-                    double d = cost(eye, look, last, new BlockPos(x, y, z));
-                    if (d < bestD) {
-                        bestD = d;
-                        best = b;
-                    }
-                }
-            }
-            if (best != null) {
-                return best;
+        for (BlockPos p : j.plan) {
+            Block b = left(j, p.x(), p.y(), p.z());
+            if (b != null) {
+                return b;
             }
         }
         return null;
+    }
+
+    /** A box is dug in bands this high, from its top: a body's height, what a player digs standing. */
+    static final int BAND = 2;
+
+    /**
+     * The order a box is dug in, the way a player clears ground: bands {@link #BAND} high from the
+     * top; in each, rows dug as a front - the row along the side the body comes from first, then
+     * the one behind it, a row the one way and the next back (a snake), from the corner nearest
+     * {@code from}; in each column of a row its blocks top down - a top, the one under it, then
+     * the next column. The next band snakes back from where the one above ended. Fixed at the
+     * start, so the body works along the rows instead of being drawn this way and that by
+     * whichever block is nearest after each one - and the row dug is always the one it can get
+     * at, nothing of the box in between.
+     */
+    static List<BlockPos> plan(BlockBox box, Vec3 from) {
+        // The front goes away from the side the body is out of the box at; from inside (or over
+        // it), rows along its longer side.
+        double outX = from == null ? 0 : outside(from.x(), box.xMin(), box.xMax());
+        double outZ = from == null ? 0 : outside(from.z(), box.zMin(), box.zMax());
+        boolean alongX = outX == outZ ? box.xMax() - box.xMin() >= box.zMax() - box.zMin() : outZ > outX;
+        int lMin = alongX ? box.xMin() : box.zMin();
+        int lMax = alongX ? box.xMax() : box.zMax();
+        int sMin = alongX ? box.zMin() : box.xMin();
+        int sMax = alongX ? box.zMax() : box.xMax();
+        double fl = from == null ? lMin : alongX ? from.x() : from.z();
+        double fs = from == null ? sMin : alongX ? from.z() : from.x();
+        boolean lUp = Math.abs(fl - (lMin + 0.5)) <= Math.abs(fl - (lMax + 0.5));
+        boolean sUp = Math.abs(fs - (sMin + 0.5)) <= Math.abs(fs - (sMax + 0.5));
+        List<BlockPos> out = new ArrayList<>();
+        for (int top = box.yMax(); top >= box.yMin(); top -= BAND) {
+            int bottom = Math.max(box.yMin(), top - BAND + 1);
+            int sTo = sUp ? sMax : sMin;
+            for (int sv = sUp ? sMin : sMax; ; sv += sUp ? 1 : -1) {
+                int lTo = lUp ? lMax : lMin;
+                for (int lv = lUp ? lMin : lMax; ; lv += lUp ? 1 : -1) {
+                    for (int y = top; y >= bottom; y--) {
+                        out.add(alongX ? new BlockPos(lv, y, sv) : new BlockPos(sv, y, lv));
+                    }
+                    if (lv == lTo) {
+                        break;
+                    }
+                }
+                lUp = !lUp;
+                if (sv == sTo) {
+                    break;
+                }
+            }
+            sUp = !sUp;
+        }
+        return out;
+    }
+
+    /** How far {@code v} is outside the cells {@code min..max} along one axis; 0 inside. */
+    private static double outside(double v, int min, int max) {
+        return v < min ? min - v : v > max + 1 ? v - (max + 1) : 0;
     }
 
     /** The box's block at a cell still to dig - known, not air, not left behind - or {@code null}. */

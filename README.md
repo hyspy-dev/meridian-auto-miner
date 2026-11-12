@@ -13,9 +13,11 @@ is still named `meridian-navigation`: the navigation it once held is core's now.
   needs core's `BuilderSelection`, on 0.6 and later. The **Selection** line shows the box dragged
   with it.
 - **What to mine**:
-  - **The selection.** The box is dug out from inside itself only: at the body's height and over
-    it the nearest block whose column above is dug (head high, then at the feet, column by column);
-    under the feet, digging down, a layer at a time from the top.
+  - **The selection.** The box is dug out from inside itself only, by a plan made at the start:
+    bands 2 blocks high from the top; in each, rows dug as a front - first the row along the side
+    the body comes from, then the one behind it, each row the other way (a snake), from the corner
+    nearest the body; in each column its top, then the block under it, then the next column. The
+    next band snakes back from where the one above ended.
   - **Blocks by name.** *How many to dig* blocks whose name holds the text (`Ore_Copper`); -1, the
     default, digs on as long as there are any. Each is looked for round where the body is then,
     48 blocks about: about what the game has loaded. A way the body's height is broken to a block in
@@ -42,8 +44,8 @@ is still named `meridian-navigation`: the navigation it once held is core's now.
   orange, through walls (core's `DebugRender`).
 - **Mine** and **Stop**. The **Mining** line says how it goes.
 
-The next block is dug the way a player digs, block by block: of the blocks that may go next (or of
-the blocks of the kind), the one cheapest to go on to. That is its distance from the eyes, plus 5 blocks
+Blocks by name go the way a player digs, block by block: of the blocks of the kind, the one
+cheapest to go on to. That is its distance from the eyes, plus 5 blocks
 for each radian the head turns to it from the block broken last, less 1.5 for a block beside it. So
 the block behind one just broken comes next, and the head goes round once, not back and forth.
 
