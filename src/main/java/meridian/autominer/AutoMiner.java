@@ -276,6 +276,9 @@ final class AutoMiner {
         Map<BlockPos, Integer> planned;
         /** Tools repaired with a kit. */
         int repairs;
+        /** The server teleported the player: the hold is to be taken again. */
+        volatile boolean teleported;
+        int retakes;
         /** The block the job went for last - what the next is looked for beside. */
         BlockPos target;
         /** Whether the plan's rows run along x ({@link #rowsAlongX}). */
@@ -303,11 +306,12 @@ final class AutoMiner {
             return new Result(Status.NOT_AVAILABLE, 0, 0, 0, 0, 0);
         }
         // The job's own hold on a game's body: it stays held between blocks.
-        Movement.Wheel wheel = movement.take().orElse(null);
-        if (wheel == null) {
+        Movement.Wheel first = movement.take().orElse(null);
+        if (first == null) {
             return new Result(Status.NOT_AVAILABLE, 0, 0, 0, 0, 0);
         }
-        wheel.released().thenRun(() -> job.compareAndSet(j.id, j.id + 1));
+        Movement.Wheel[] wheel = {first};
+        watch(j, first);
         try {
             int found = 0;
             j.start = carried();
@@ -321,6 +325,9 @@ final class AutoMiner {
             Worker.Access access = j.box != null ? Worker.Access.inside(j.box) : Worker.Access.ANY;
             Worker.Tools tools = j.options.tools();
             while (j.live()) {
+                if (j.teleported && !retake(j, wheel)) {
+                    break;
+                }
                 if (j.options.unload() != Unload.OFF && full()) {
                     unload(j);
                 }
@@ -350,7 +357,12 @@ final class AutoMiner {
                 claim(j);
                 switch (d.outcome()) {
                     case BROKEN -> j.dug++;
-                    case INTERRUPTED, NOT_AVAILABLE -> j.stopped = true;
+                    case INTERRUPTED, NOT_AVAILABLE -> {
+                        // The server's teleport ends the job's hold, not the job: taken again, it goes on.
+                        if (!j.teleported || !retake(j, wheel)) {
+                            j.stopped = true;
+                        }
+                    }
                     default -> {
                         j.skipped.add(at);
                         log.info("auto-miner: left the block at {} ({})", text(at), d.outcome());
@@ -378,8 +390,49 @@ final class AutoMiner {
             return new Result(s, j.broken.size(), j.dug, j.skipped.size(), j.picked, left(j), j.unloaded);
         } finally {
             unmark();
-            wheel.release();
+            wheel[0].release();
         }
+    }
+
+    /** At most this many server teleports a job is taken up again after. */
+    static final int MAX_RETAKES = 10;
+
+    /**
+     * Ends the job when its hold goes - the player pressing a key, a death, a Go or Stop - but not when
+     * the server teleports the player (a correction of where it stands): then it is taken again.
+     */
+    private void watch(Job j, Movement.Wheel w) {
+        w.released().thenAccept(why -> {
+            if (why == Movement.Release.TELEPORT && j.retakes < MAX_RETAKES && job.get() == j.id) {
+                j.teleported = true;
+                log.info("auto-miner: the server teleported the player - the job goes on");
+            } else {
+                job.compareAndSet(j.id, j.id + 1);
+            }
+        });
+    }
+
+    /** The body taken again after the server's teleport: waits up to 5 s for core to give it. */
+    private boolean retake(Job j, Movement.Wheel[] wheel) {
+        j.teleported = false;
+        j.retakes++;
+        long until = System.nanoTime() + 5_000_000_000L;
+        while (System.nanoTime() < until && job.get() == j.id) {
+            try {
+                Thread.sleep(250);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+            Movement.Wheel w = movement.take().orElse(null);
+            if (w != null) {
+                wheel[0] = w;
+                watch(j, w);
+                return true;
+            }
+        }
+        log.info("auto-miner: the body was not given back after the teleport");
+        return false;
     }
 
     /** Whether the block being dug is outlined. */
@@ -654,45 +707,61 @@ final class AutoMiner {
                 return under;
             }
         }
-        // The row the plan is at, top first in each column. A row just begun is begun at the end of
-        // what is left of it nearer the block broken last; a row under way goes on from the block broken
-        // last to the column nearest it. So a row is dug in one pass along it - not from the end the
-        // plan reckoned at the start, which a row half dug already, or the one before finished at its
-        // other end, would send the body running to.
-        int row = j.alongX ? planned.z() : planned.x();
-        boolean going = prev != null && band(box, prev.y()) == band && (j.alongX ? prev.z() : prev.x()) == row;
-        java.util.List<BlockPos> open = new ArrayList<>();
-        int lo = Integer.MAX_VALUE;
-        int hi = Integer.MIN_VALUE;
-        for (BlockPos p : j.plan) {
-            if (band(box, p.y()) != band || (j.alongX ? p.z() : p.x()) != row || left(j, p.x(), p.y(), p.z()) == null) {
-                continue;
-            }
-            int l = j.alongX ? p.x() : p.z();
-            lo = Math.min(lo, l);
-            hi = Math.max(hi, l);
-            if (band(box, p.y() + 1) == band && box.contains(p.x(), p.y() + 1, p.z())
-                    && left(j, p.x(), p.y() + 1, p.z()) != null) {
-                continue;                     // its top first
-            }
-            open.add(p);
-        }
-        double from;
-        if (going) {
-            from = j.alongX ? prev.x() : prev.z();
+        // Then the column nearest the block broken last - of the band being dug, its top first. Another
+        // row costs a little more than the same row (ROW_CHANGE), so a whole slab goes row by row, a
+        // snake; but where a row runs into a stretch dug already the blocks beside come first, not the
+        // row's far end past the gap. With nothing broken yet: the one nearest the body.
+        double fx;
+        double fz;
+        if (prev != null) {
+            fx = prev.x() + 0.5;
+            fz = prev.z() + 0.5;
         } else {
-            // The end nearer where the digging was - the block broken last, the row before's end; the
-            // body may stand back from it. With nothing broken yet, the end nearer the body.
-            double at = prev != null ? (j.alongX ? prev.x() : prev.z()) : (j.alongX ? me.x() - 0.5 : me.z() - 0.5);
-            from = Math.abs(at - lo) <= Math.abs(at - hi) ? lo : hi;
+            // Begun at an end of the plan's first row - of what is left of it, the end nearer the body.
+            int row0 = j.alongX ? planned.z() : planned.x();
+            int lo = Integer.MAX_VALUE;
+            int hi = Integer.MIN_VALUE;
+            for (BlockPos p : j.plan) {
+                if (band(box, p.y()) == band && (j.alongX ? p.z() : p.x()) == row0 && left(j, p.x(), p.y(), p.z()) != null) {
+                    int l = j.alongX ? p.x() : p.z();
+                    lo = Math.min(lo, l);
+                    hi = Math.max(hi, l);
+                }
+            }
+            double body = j.alongX ? me.x() - 0.5 : me.z() - 0.5;
+            int end = Math.abs(body - lo) <= Math.abs(body - hi) ? lo : hi;
+            fx = (j.alongX ? end : row0) + 0.5;
+            fz = (j.alongX ? row0 : end) + 0.5;
         }
+        int prevRow = prev == null ? Integer.MIN_VALUE : (j.alongX ? prev.z() : prev.x());
         Block nearest = null;
         double best = Double.MAX_VALUE;
-        for (BlockPos p : open) {
-            double d = Math.abs((j.alongX ? p.x() : p.z()) - from);
-            if (d < best - 1e-6) {
+        int bestAt = Integer.MAX_VALUE;
+        for (BlockPos p : j.plan) {
+            if (band(box, p.y()) != band) {
+                continue;
+            }
+            Block b = left(j, p.x(), p.y(), p.z());
+            if (b == null || (band(box, p.y() + 1) == band && box.contains(p.x(), p.y() + 1, p.z())
+                    && left(j, p.x(), p.y() + 1, p.z()) != null)) {
+                continue;                     // its top first
+            }
+            int row = j.alongX ? p.z() : p.x();
+            double d = Math.hypot(p.x() + 0.5 - fx, p.z() + 0.5 - fz)
+                    + (prevRow == Integer.MIN_VALUE ? 0 : ROW_CHANGE * Math.abs(row - prevRow));
+            if (row != prevRow) {
+                // Into another row at an end of what is left of it, not its middle: a middle leaves a
+                // piece of the row behind, to come back for.
+                int l = j.alongX ? p.x() : p.z();
+                if (rowLeft(j, box, band, row, l - 1) && rowLeft(j, box, band, row, l + 1)) {
+                    d += ROW_MIDDLE;
+                }
+            }
+            int at = j.planned.get(p);
+            if (d < best - 1e-6 || (Math.abs(d - best) <= 1e-6 && at < bestAt)) {
                 best = d;
-                nearest = world.blockAt(p.x(), p.y(), p.z());
+                bestAt = at;
+                nearest = b;
             }
         }
         return nearest != null ? nearest : planned;
@@ -751,6 +820,23 @@ final class AutoMiner {
         double dy = p.y() + 0.5 - eye.y();
         double dz = p.z() + 0.5 - eye.z();
         return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    /** Going on to a column of another row costs this much more per row: a row is dug along, not across. */
+    static final double ROW_CHANGE = 1.5;
+    /** ... and this much more into the middle of what is left of that row, rather than at an end of it. */
+    static final double ROW_MIDDLE = 2.0;
+
+    /** Whether the column at {@code l} along a row of the band being dug has anything left in it. */
+    private boolean rowLeft(Job j, BlockBox box, int band, int row, int l) {
+        int x = j.alongX ? l : row;
+        int z = j.alongX ? row : l;
+        for (int y = box.yMax(); y >= box.yMin(); y--) {
+            if (band(box, y) == band && box.contains(x, y, z) && left(j, x, y, z) != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** A box is dug in bands this high, from its top: a body's height, what a player digs standing. */

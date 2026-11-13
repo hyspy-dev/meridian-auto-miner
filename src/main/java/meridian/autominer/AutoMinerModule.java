@@ -195,6 +195,10 @@ public class AutoMinerModule implements ProxyModule {
             return;
         }
         BlockBox box = box(selection);
+        if (box != null && !box.equals(kept)) {
+            kept = box;
+            writeKept(keptFile, kept);
+        }
         if (box == null) {
             box = kept;                       // the one from before: a new session has none of its own yet
         }
