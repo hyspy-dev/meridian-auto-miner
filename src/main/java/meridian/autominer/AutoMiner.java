@@ -366,6 +366,7 @@ final class AutoMiner {
         try {
             int found = 0;
             j.start = carried();
+            unloadAtStart(j);
             if (entities != null) {
                 for (int e : entities.trackedEntities()) {
                     if (entities.itemOf(e).isPresent()) {
@@ -651,6 +652,34 @@ final class AutoMiner {
                 dug.put(item, more);
             }
         });
+        unload(j, dug);
+    }
+
+    /**
+     * Begun with no room left at all (and unloading on): the blocks and ores carried from before go
+     * to the chests first - building stuff, ores and bars; gear, food and kits stay. Then the job
+     * counts from what is left.
+     */
+    private void unloadAtStart(Job j) throws Exception {
+        if (j.options.unload() == Unload.OFF || !full()) {
+            return;
+        }
+        meridian.core.api.Player p = world.player().orElse(null);
+        Map<String, Integer> stuff = new HashMap<>();
+        carried().forEach((item, n) -> {
+            if (item.startsWith("Ore_") || item.startsWith("Ingredient_Bar_") || (p != null && p.placesBlock(item))) {
+                stuff.put(item, n);
+            }
+        });
+        log.info("auto-miner: no room left at the start - unloading the blocks and ores first ({} kind(s))",
+                stuff.size());
+        unload(j, stuff);
+        j.start = carried();
+    }
+
+    /** Puts {@code what} (item to how many) into the chosen chest, or the nearest ones with room, in turn. */
+    private void unload(Job j, Map<String, Integer> what) throws Exception {
+        Map<String, Integer> dug = new HashMap<>(what);
         if (dug.isEmpty()) {
             return;
         }
