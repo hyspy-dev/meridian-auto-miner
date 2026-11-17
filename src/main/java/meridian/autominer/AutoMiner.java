@@ -111,16 +111,33 @@ final class AutoMiner {
      * @param unload where what the job dug goes, when the inventory is full and at the end
      * @param chest  with {@link Unload#CHOSEN}, the chest
      */
-    record Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest, boolean repair) {
+    record Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest, boolean repair,
+                   boolean drill) {
 
-        static final Options DEFAULT = new Options(true, PickUp.AT_END, 20, Unload.OFF, null, false);
+        static final Options DEFAULT = new Options(true, PickUp.AT_END, 20, Unload.OFF, null, false, false);
 
         Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest) {
-            this(shovel, pickUp, every, unload, chest, false);
+            this(shovel, pickUp, every, unload, chest, false, false);
         }
 
+        Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest, boolean repair) {
+            this(shovel, pickUp, every, unload, chest, repair, false);
+        }
+
+        /**
+         * The tools preferred: a shovel for soils; with the drill, the drill for everything else it
+         * breaks - core takes it where a swing of it takes at least what the best single tool does
+         * (not the hardest ores) and where it breaks nothing outside the box.
+         */
         Worker.Tools tools() {
-            return shovel ? new Worker.Tools(Map.of("Soils", "Shovel")) : Worker.Tools.BEST;
+            Map<String, String> prefer = new java.util.HashMap<>();
+            if (drill) {
+                prefer.put("*", "Drill");
+            }
+            if (shovel) {
+                prefer.put("Soils", "Shovel");
+            }
+            return prefer.isEmpty() ? Worker.Tools.BEST : new Worker.Tools(Map.copyOf(prefer));
         }
     }
 
@@ -290,6 +307,8 @@ final class AutoMiner {
         Map<BlockPos, Integer> planned;
         /** Tools repaired with a kit. */
         int repairs;
+        /** Tools the server would not repair this job. */
+        final Set<String> refused = new HashSet<>();
         /** The server teleported the player: the hold is to be taken again. */
         volatile boolean teleported;
         int retakes;
@@ -946,7 +965,14 @@ final class AutoMiner {
         }
         for (meridian.core.api.Containers.Item item : hotbar.items().values()) {
             if (item == null || item.id() == null || !item.id().startsWith("Tool_") || item.id().contains("Repair_Kit")
-                    || item.maxDurability() <= 0 || item.durability() / item.maxDurability() >= BROKEN) {
+                    || item.maxDurability() <= 0 || item.durability() / item.maxDurability() >= BROKEN
+                    || j.refused.contains(item.id())) {
+                continue;
+            }
+            // Repaired as far as it goes - a repair gives it its floor's few points, no more: with a
+            // tool of the same use in good order beside it, that one digs (core takes it first) and
+            // no kit goes on this one.
+            if (item.maxDurability() <= REPAIR_FLOOR && sameUseInOrder(hotbar, item)) {
                 continue;
             }
             status = progress(j, "repairing " + item.id());
@@ -955,11 +981,34 @@ final class AutoMiner {
                 log.info("auto-miner: {} {}", item.id(), done ? "repaired with a kit" : "not repaired");
                 if (done) {
                     j.repairs++;
+                } else {
+                    j.refused.add(item.id());     // the server would not (the kit's toll too big): not again this job
                 }
             } catch (Exception e) {
                 log.info("auto-miner: repairing {} failed: {}", item.id(), e.toString());
             }
         }
+    }
+
+    /** The most durability a repair leaves a tool at the least (the server's {@code RepairItemInteraction}). */
+    static final double REPAIR_FLOOR = 10;
+
+    /**
+     * Whether the hotbar has another tool of the same use as {@code worn} - the same kind, its id up
+     * to the material ({@code Tool_Pickaxe_...}) - with durability left, not repaired as far as it goes.
+     */
+    private static boolean sameUseInOrder(meridian.core.api.PlayerState.Section hotbar,
+                                          meridian.core.api.Containers.Item worn) {
+        String id = worn.id();
+        int cut = id.indexOf('_', "Tool_".length());
+        String kind = cut < 0 ? id : id.substring(0, cut + 1);
+        for (meridian.core.api.Containers.Item other : hotbar.items().values()) {
+            if (other != null && other != worn && other.id() != null && other.id().startsWith(kind)
+                    && (other.maxDurability() <= 0 || (other.durability() > 0 && other.maxDurability() > REPAIR_FLOOR))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Which band of the box (see {@link #plan}) a height is in: 0 the top one. */

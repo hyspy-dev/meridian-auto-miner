@@ -99,6 +99,8 @@ public class AutoMinerModule implements ProxyModule {
     private volatile meridian.core.api.BlockPos chest;
     /** Repair a broken tool with a kit from the hotbar before digging on. */
     private volatile boolean repair;
+    /** Dig with a drill from the hotbar where it pays (core weighs it block by block). */
+    private volatile boolean drill;
     /** The selection last seen, kept in the module's data folder: it outlives the session. */
     private volatile BlockBox kept;
     private java.nio.file.Path keptFile;
@@ -144,6 +146,7 @@ public class AutoMinerModule implements ProxyModule {
                 .int_("mineCount", "How many to dig (-1: no end)", -1, 100000, count, v -> count = v)
                 .bool("mineShovel", "Shovel for dirt, gravel and sand", shovel, v -> shovel = v)
                 .bool("mineRepair", "Repair a broken tool with a kit from the hotbar", repair, v -> repair = v)
+                .bool("mineDrill", "Use the drill (2x2 a swing) where it pays", drill, v -> drill = v)
                 .enum_("minePickUp", "Pick up the drops", PickUpChoice.class, PickUpChoice.AT_END,
                         v -> pickUp = v.mode)
                 .int_("minePickUpEvery", "... whenever this many lie about", 1, 1000, every, v -> every = v)
@@ -171,7 +174,7 @@ public class AutoMinerModule implements ProxyModule {
         // Kept across restarts, every choice of the panel: saved values come back through the same
         // setters at the start.
         spec.persistent("mineMode", "mineName", "mineCount", "mineShovel", "minePickUp", "minePickUpEvery",
-                "mineUnload", "mineShowTarget", "mineRepair");
+                "mineUnload", "mineShowTarget", "mineRepair", "mineDrill");
         if (selection != null) {
             spec.persistent("selectionTool");
         }
@@ -181,7 +184,7 @@ public class AutoMinerModule implements ProxyModule {
 
     /** How a job goes, as the panel (or the command channel) set it. */
     private AutoMiner.Options options() {
-        return new AutoMiner.Options(shovel, pickUp, every, unload, chest, repair);
+        return new AutoMiner.Options(shovel, pickUp, every, unload, chest, repair, drill);
     }
 
     /** Mines what the mode says; the Mining line says how it goes. */
@@ -265,6 +268,7 @@ public class AutoMinerModule implements ProxyModule {
         switch (what) {
             case "shovel" -> shovel = value.equals("on") || value.equals("true");
             case "repair" -> repair = value.equals("on") || value.equals("true");
+            case "drill" -> drill = value.equals("on") || value.equals("true");
             case "pickup" -> {
                 pickUp = switch (value) {
                     case "none" -> AutoMiner.PickUp.NONE;
