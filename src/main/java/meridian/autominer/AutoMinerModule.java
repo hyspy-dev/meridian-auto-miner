@@ -102,7 +102,7 @@ public class AutoMinerModule implements ProxyModule {
     private volatile boolean repair;
     /** Dig with a drill from the hotbar where it pays (core weighs it block by block). */
     private volatile boolean drill;
-    /** How far from the body the nearest chest is looked for. */
+    /** How far chests are looked for: from the body (the nearest), from the chosen chest (by it). */
     private volatile int chestRadius = (int) AutoMiner.CHEST_AROUND;
     /** The selection last seen - a setting kept like the others: it outlives the session. */
     private volatile BlockBox kept;
@@ -154,7 +154,7 @@ public class AutoMinerModule implements ProxyModule {
                         v -> pickUp = v.mode)
                 .int_("minePickUpEvery", "... whenever this many lie about", 1, 1000, every, v -> every = v)
                 .enum_("mineUnload", "Unload what was dug", UnloadChoice.class, UnloadChoice.OFF, v -> unload = v.mode)
-                .int_("mineChestRadius", "... the nearest chest within (blocks)", 4, 2048, chestRadius,
+                .int_("mineChestRadius", "... chests within (blocks) of the body / the chosen one", 4, 2048, chestRadius,
                         v -> chestRadius = v)
                 .button("Choose the chest I opened last", () -> {
                     meridian.core.api.BlockPos last = containers == null ? null : containers.lastOpened().orElse(null);

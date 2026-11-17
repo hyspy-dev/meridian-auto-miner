@@ -99,7 +99,7 @@ final class AutoMiner {
         NEAREST,
         /**
          * Into the chests by {@link Options#chest}: it first, then the others within
-         * {@link #CHESTS_BY_CHOSEN} of it, nearest to it first - one chest fills at once.
+         * {@link Options#chestRadius} of it, nearest to it first - one chest fills at once.
          */
         CHOSEN
     }
@@ -626,8 +626,8 @@ final class AutoMiner {
      * chest, or the nearest ones with room in turn.
      */
     /**
-     * Chests found full: what was carried there did not all go in. Passed over by the unloads after,
-     * until one shows a free slot again (opened, emptied - by the player or anyone).
+     * Chests found full: what was carried there did not all go in. The unloads after go to the others
+     * first and come back to these only for what is left - until one shows a free slot again.
      */
     private final Set<BlockPos> fullChests = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
@@ -642,9 +642,6 @@ final class AutoMiner {
         }
         return this;
     }
-
-    /** How far round the chosen chest the others it unloads into stand. */
-    static final double CHESTS_BY_CHOSEN = 8;
 
     private void unload(Job j) throws Exception {
         Map<String, Integer> dug = new HashMap<>();
@@ -663,7 +660,7 @@ final class AutoMiner {
             if (chosen != null) {
                 chests.add(chosen);
                 Vec3 at = new Vec3(chosen.x() + 0.5, chosen.y() + 0.5, chosen.z() + 0.5);
-                for (Block b : world.find(at, CHESTS_BY_CHOSEN, t -> t.name() != null && t.name().contains("Chest"),
+                for (Block b : world.find(at, j.options.chestRadius(), t -> t.name() != null && t.name().contains("Chest"),
                         CHESTS_TRIED)) {
                     BlockPos p = b.base();
                     if (!chests.contains(p)) {
@@ -680,12 +677,14 @@ final class AutoMiner {
                 }
             }
         }
-        for (BlockPos chest : chests) {
+        // The chests found full come last: tried again only when the others did not take it all - one
+        // may have been emptied, or broken and set up anew, out of the player's sight.
+        List<BlockPos> order = new ArrayList<>();
+        chests.stream().filter(c -> !fullChests.contains(c)).forEach(order::add);
+        chests.stream().filter(fullChests::contains).forEach(order::add);
+        for (BlockPos chest : order) {
             if (!j.live() || dug.isEmpty()) {
                 break;
-            }
-            if (fullChests.contains(chest)) {
-                continue;                     // found full before: not walked to again
             }
             status = progress(j, "unloading into the chest at " + text(chest));
             Map<String, Integer> moved = worker.deposit(chest, dug).get(5, TimeUnit.MINUTES);
@@ -694,8 +693,11 @@ final class AutoMiner {
                 dug.computeIfPresent(item, (k, v) -> v - n > 0 ? v - n : null);
             });
             if (j.live() && !dug.isEmpty()) {
-                fullChests.add(chest);        // something stayed with the body: no room left there
-                log.info("auto-miner: the chest at {} is full - passed over from now on", text(chest));
+                if (fullChests.add(chest)) {  // something stayed with the body: no room left there
+                    log.info("auto-miner: the chest at {} is full - the others first from now on", text(chest));
+                }
+            } else if (!moved.isEmpty()) {
+                fullChests.remove(chest);     // it took it all after all
             }
         }
         if (!dug.isEmpty()) {
