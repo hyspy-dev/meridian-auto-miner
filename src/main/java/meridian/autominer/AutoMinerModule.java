@@ -102,6 +102,8 @@ public class AutoMinerModule implements ProxyModule {
     private volatile boolean repair;
     /** Dig with a drill from the hotbar where it pays (core weighs it block by block). */
     private volatile boolean drill;
+    /** How far from the body the nearest chest is looked for. */
+    private volatile int chestRadius = (int) AutoMiner.CHEST_AROUND;
     /** The selection last seen - a setting kept like the others: it outlives the session. */
     private volatile BlockBox kept;
     private final SettingBinding<String> keptSetting = new SettingBinding<>();   // no start value: the saved one stands
@@ -152,6 +154,8 @@ public class AutoMinerModule implements ProxyModule {
                         v -> pickUp = v.mode)
                 .int_("minePickUpEvery", "... whenever this many lie about", 1, 1000, every, v -> every = v)
                 .enum_("mineUnload", "Unload what was dug", UnloadChoice.class, UnloadChoice.OFF, v -> unload = v.mode)
+                .int_("mineChestRadius", "... the nearest chest within (blocks)", 4, 2048, chestRadius,
+                        v -> chestRadius = v)
                 .button("Choose the chest I opened last", () -> {
                     meridian.core.api.BlockPos last = containers == null ? null : containers.lastOpened().orElse(null);
                     if (last == null) {
@@ -175,7 +179,7 @@ public class AutoMinerModule implements ProxyModule {
         // Kept across restarts, every choice of the panel: saved values come back through the same
         // setters at the start.
         spec.persistent("mineMode", "mineName", "mineCount", "mineShovel", "minePickUp", "minePickUpEvery",
-                "mineUnload", "mineShowTarget", "mineRepair", "mineDrill", "mineKept", "mineChest");
+                "mineUnload", "mineShowTarget", "mineRepair", "mineDrill", "mineKept", "mineChest", "mineChestRadius");
         if (selection != null) {
             spec.persistent("selectionTool");
         }
@@ -185,7 +189,7 @@ public class AutoMinerModule implements ProxyModule {
 
     /** How a job goes, as the panel (or the command channel) set it. */
     private AutoMiner.Options options() {
-        return new AutoMiner.Options(shovel, pickUp, every, unload, chest, repair, drill);
+        return new AutoMiner.Options(shovel, pickUp, every, unload, chest, repair, drill, chestRadius);
     }
 
     /** Mines what the mode says; the Mining line says how it goes. */

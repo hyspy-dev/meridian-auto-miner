@@ -115,16 +115,17 @@ final class AutoMiner {
      * @param chest  with {@link Unload#CHOSEN}, the chest
      */
     record Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest, boolean repair,
-                   boolean drill) {
+                   boolean drill, double chestRadius) {
 
-        static final Options DEFAULT = new Options(true, PickUp.AT_END, 20, Unload.OFF, null, false, false);
+        static final Options DEFAULT = new Options(true, PickUp.AT_END, 20, Unload.OFF, null, false, false,
+                CHEST_AROUND);
 
         Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest) {
-            this(shovel, pickUp, every, unload, chest, false, false);
+            this(shovel, pickUp, every, unload, chest, false, false, CHEST_AROUND);
         }
 
         Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest, boolean repair) {
-            this(shovel, pickUp, every, unload, chest, repair, false);
+            this(shovel, pickUp, every, unload, chest, repair, false, CHEST_AROUND);
         }
 
         /**
@@ -655,7 +656,7 @@ final class AutoMiner {
         } else {
             Vec3 me = movement.position();
             if (me != null) {
-                for (Block b : world.find(me, CHEST_AROUND, t -> t.name() != null && t.name().contains("Chest"),
+                for (Block b : world.find(me, j.options.chestRadius(), t -> t.name() != null && t.name().contains("Chest"),
                         CHESTS_TRIED)) {
                     chests.add(b.base());
                 }
