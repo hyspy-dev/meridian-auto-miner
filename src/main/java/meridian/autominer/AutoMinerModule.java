@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import meridian.api.module.ModuleContext;
 import meridian.api.module.ProxyModule;
+import meridian.api.settings.SettingBinding;
 import meridian.api.settings.SettingsSpec;
 import meridian.core.api.BlockBox;
 import meridian.core.api.BuilderSelection;
@@ -101,9 +102,11 @@ public class AutoMinerModule implements ProxyModule {
     private volatile boolean repair;
     /** Dig with a drill from the hotbar where it pays (core weighs it block by block). */
     private volatile boolean drill;
-    /** The selection last seen, kept in the module's data folder: it outlives the session. */
+    /** The selection last seen - a setting kept like the others: it outlives the session. */
     private volatile BlockBox kept;
-    private java.nio.file.Path keptFile;
+    private final SettingBinding<String> keptSetting = new SettingBinding<>();   // no start value: the saved one stands
+    /** The chosen chest, a setting kept like the others; set by the button or the command. */
+    private final SettingBinding<String> chestSetting = new SettingBinding<>();
 
     @Override
     public void onEnable(ModuleContext ctx) {
@@ -120,13 +123,10 @@ public class AutoMinerModule implements ProxyModule {
                 ctx.services().get(meridian.core.api.InteractionControl.class).orElse(null), ctx.offloadExecutor(),
                 ctx.getLogger());
         miner.navigator(ctx.services().get(meridian.core.api.Navigator.class).orElse(null));
-        keptFile = ctx.getDataDir().resolve("selection.txt");
-        kept = readKept(keptFile);
         if (selection != null) {
             selection.onSelection(b -> {
                 if (b != null) {
-                    kept = BlockBox.of(b.xMin(), b.yMin(), b.zMin(), b.xMax(), b.yMax(), b.zMax());
-                    writeKept(keptFile, kept);
+                    keep(BlockBox.of(b.xMin(), b.yMin(), b.zMin(), b.xMax(), b.yMax(), b.zMax()));
                 }
             });
         }
@@ -141,6 +141,7 @@ public class AutoMinerModule implements ProxyModule {
                             on ? List.of(BuilderSelection.SELECTION_TOOL) : List.of()))
                     .liveText("Selection", () -> describe(selection.current().orElse(null), kept));
         }
+        spec.string("mineKept", "Kept selection (x y z  x y z)", "", v -> kept = box(v), keptSetting);
         spec.enum_("mineMode", "What to mine", MineMode.class, MineMode.SELECTION, v -> mode = v)
                 .string("mineName", "Blocks (a part of the name)", name, v -> name = v == null ? "" : v.trim())
                 .int_("mineCount", "How many to dig (-1: no end)", -1, 100000, count, v -> count = v)
@@ -157,10 +158,10 @@ public class AutoMinerModule implements ProxyModule {
                         note = "No chest opened yet - open the one to unload into in the game.";
                         return;
                     }
-                    chest = last;
+                    choose(last);
                     note = "";
                 })
-                .liveText("Chest", () -> chest == null ? "None chosen." : chest.x() + " " + chest.y() + " " + chest.z())
+                .string("mineChest", "Chest (x y z)", "", v -> chest = pos(v), chestSetting)
                 .bool("mineShowTarget", "Outline the block being dug", showTarget, v -> {
                     showTarget = v;
                     miner.showTarget(v);
@@ -174,7 +175,7 @@ public class AutoMinerModule implements ProxyModule {
         // Kept across restarts, every choice of the panel: saved values come back through the same
         // setters at the start.
         spec.persistent("mineMode", "mineName", "mineCount", "mineShovel", "minePickUp", "minePickUpEvery",
-                "mineUnload", "mineShowTarget", "mineRepair", "mineDrill");
+                "mineUnload", "mineShowTarget", "mineRepair", "mineDrill", "mineKept", "mineChest");
         if (selection != null) {
             spec.persistent("selectionTool");
         }
@@ -200,8 +201,7 @@ public class AutoMinerModule implements ProxyModule {
         }
         BlockBox box = box(selection);
         if (box != null && !box.equals(kept)) {
-            kept = box;
-            writeKept(keptFile, kept);
+            keep(box);
         }
         if (box == null) {
             box = kept;                       // the one from before: a new session has none of its own yet
@@ -231,33 +231,46 @@ public class AutoMinerModule implements ProxyModule {
                 + n + " blocks)";
     }
 
-    /** The selection kept in {@code file}: six numbers; {@code null} when there is none. */
-    private static BlockBox readKept(java.nio.file.Path file) {
-        try {
-            if (!java.nio.file.Files.isRegularFile(file)) {
-                return null;
-            }
-            String[] v = java.nio.file.Files.readString(file).trim().split("\\s+");
-            if (v.length != 6) {
-                return null;
-            }
-            int[] n = new int[6];
-            for (int i = 0; i < 6; i++) {
-                n[i] = Integer.parseInt(v[i]);
-            }
-            return BlockBox.of(n[0], n[1], n[2], n[3], n[4], n[5]);
-        } catch (Exception e) {
-            return null;
-        }
+    /** The selection kept: the field at once, the setting (saved with the others) through its binding. */
+    private void keep(BlockBox b) {
+        kept = b;
+        keptSetting.set(b.xMin() + " " + b.yMin() + " " + b.zMin() + "  " + b.xMax() + " " + b.yMax() + " " + b.zMax());
     }
 
-    private static void writeKept(java.nio.file.Path file, BlockBox b) {
+    /** The chest chosen: the field at once, the setting through its binding. */
+    private void choose(meridian.core.api.BlockPos p) {
+        chest = p;
+        chestSetting.set(p.x() + " " + p.y() + " " + p.z());
+    }
+
+    /** A kept selection's text: six numbers; {@code null} when it is not one. */
+    private static BlockBox box(String text) {
+        int[] n = numbers(text, 6);
+        return n == null ? null : BlockBox.of(n[0], n[1], n[2], n[3], n[4], n[5]);
+    }
+
+    /** A chest's text: three numbers; {@code null} when it is not one. */
+    private static meridian.core.api.BlockPos pos(String text) {
+        int[] n = numbers(text, 3);
+        return n == null ? null : new meridian.core.api.BlockPos(n[0], n[1], n[2]);
+    }
+
+    private static int[] numbers(String text, int count) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        String[] v = text.trim().split("\s+");
+        if (v.length != count) {
+            return null;
+        }
         try {
-            java.nio.file.Files.createDirectories(file.getParent());
-            java.nio.file.Files.writeString(file, b.xMin() + " " + b.yMin() + " " + b.zMin() + " " + b.xMax() + " "
-                    + b.yMax() + " " + b.zMax());
-        } catch (Exception e) {
-            // a selection not kept is only one to drag again
+            int[] n = new int[count];
+            for (int i = 0; i < count; i++) {
+                n[i] = Integer.parseInt(v[i]);
+            }
+            return n;
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
@@ -290,8 +303,8 @@ public class AutoMinerModule implements ProxyModule {
                     if (args.size() < 6) {
                         throw new IllegalArgumentException(USAGE);
                     }
-                    chest = new meridian.core.api.BlockPos(Integer.parseInt(args.get(3)), Integer.parseInt(args.get(4)),
-                            Integer.parseInt(args.get(5)));
+                    choose(new meridian.core.api.BlockPos(Integer.parseInt(args.get(3)), Integer.parseInt(args.get(4)),
+                            Integer.parseInt(args.get(5))));
                 }
             }
             default -> throw new IllegalArgumentException(USAGE);
