@@ -97,7 +97,10 @@ final class AutoMiner {
         OFF,
         /** Into the nearest chest with room. */
         NEAREST,
-        /** Into {@link Options#chest}. */
+        /**
+         * Into the chests by {@link Options#chest}: it first, then the others within
+         * {@link #CHESTS_BY_CHOSEN} of it, nearest to it first - one chest fills at once.
+         */
         CHOSEN
     }
 
@@ -621,6 +624,9 @@ final class AutoMiner {
      * Puts what the job dug - what the player carries more of than when it started - into the chosen
      * chest, or the nearest ones with room in turn.
      */
+    /** How far round the chosen chest the others it unloads into stand. */
+    static final double CHESTS_BY_CHOSEN = 8;
+
     private void unload(Job j) throws Exception {
         Map<String, Integer> dug = new HashMap<>();
         carried().forEach((item, n) -> {
@@ -634,8 +640,17 @@ final class AutoMiner {
         }
         List<BlockPos> chests = new ArrayList<>();
         if (j.options.unload() == Unload.CHOSEN) {
-            if (j.options.chest() != null) {
-                chests.add(j.options.chest());
+            BlockPos chosen = j.options.chest();
+            if (chosen != null) {
+                chests.add(chosen);
+                Vec3 at = new Vec3(chosen.x() + 0.5, chosen.y() + 0.5, chosen.z() + 0.5);
+                for (Block b : world.find(at, CHESTS_BY_CHOSEN, t -> t.name() != null && t.name().contains("Chest"),
+                        CHESTS_TRIED)) {
+                    BlockPos p = b.base();
+                    if (!chests.contains(p)) {
+                        chests.add(p);
+                    }
+                }
             }
         } else {
             Vec3 me = movement.position();

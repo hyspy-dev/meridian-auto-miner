@@ -53,7 +53,7 @@ public class AutoMinerModule implements ProxyModule {
     enum UnloadChoice {
         OFF("Keep it", AutoMiner.Unload.OFF),
         NEAREST("The nearest chest with room", AutoMiner.Unload.NEAREST),
-        CHOSEN("The chosen chest", AutoMiner.Unload.CHOSEN);
+        CHOSEN("The chests by the chosen one", AutoMiner.Unload.CHOSEN);
 
         private final String label;
         final AutoMiner.Unload mode;
