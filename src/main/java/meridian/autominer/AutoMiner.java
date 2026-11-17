@@ -625,6 +625,24 @@ final class AutoMiner {
      * Puts what the job dug - what the player carries more of than when it started - into the chosen
      * chest, or the nearest ones with room in turn.
      */
+    /**
+     * Chests found full: what was carried there did not all go in. Passed over by the unloads after,
+     * until one shows a free slot again (opened, emptied - by the player or anyone).
+     */
+    private final Set<BlockPos> fullChests = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** Where a chest found full is seen to have room again. */
+    AutoMiner containers(meridian.core.api.Containers containers) {
+        if (containers != null) {
+            containers.subscribe((block, contents) -> {
+                if (contents != null && contents.items().size() < contents.capacity() && fullChests.remove(block)) {
+                    log.info("auto-miner: the chest at {} has room again", text(block));
+                }
+            });
+        }
+        return this;
+    }
+
     /** How far round the chosen chest the others it unloads into stand. */
     static final double CHESTS_BY_CHOSEN = 8;
 
@@ -666,12 +684,19 @@ final class AutoMiner {
             if (!j.live() || dug.isEmpty()) {
                 break;
             }
+            if (fullChests.contains(chest)) {
+                continue;                     // found full before: not walked to again
+            }
             status = progress(j, "unloading into the chest at " + text(chest));
             Map<String, Integer> moved = worker.deposit(chest, dug).get(5, TimeUnit.MINUTES);
             moved.forEach((item, n) -> {
                 j.unloaded += n;
                 dug.computeIfPresent(item, (k, v) -> v - n > 0 ? v - n : null);
             });
+            if (j.live() && !dug.isEmpty()) {
+                fullChests.add(chest);        // something stayed with the body: no room left there
+                log.info("auto-miner: the chest at {} is full - passed over from now on", text(chest));
+            }
         }
         if (!dug.isEmpty()) {
             log.info("auto-miner: {} item(s) found no room in a chest", dug.values().stream().mapToInt(Integer::intValue).sum());

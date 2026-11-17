@@ -124,7 +124,7 @@ public class AutoMinerModule implements ProxyModule {
                 ctx.services().get(meridian.core.api.DebugRender.class).orElse(null),
                 ctx.services().get(meridian.core.api.InteractionControl.class).orElse(null), ctx.offloadExecutor(),
                 ctx.getLogger());
-        miner.navigator(ctx.services().get(meridian.core.api.Navigator.class).orElse(null));
+        miner.navigator(ctx.services().get(meridian.core.api.Navigator.class).orElse(null)).containers(containers);
         if (selection != null) {
             selection.onSelection(b -> {
                 if (b != null) {
