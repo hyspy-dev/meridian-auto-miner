@@ -50,8 +50,16 @@ final class AutoMiner {
     static final double TURN_NEAR = 6.0;
     /** A block beside the one broken last comes this much nearer: a player digs on from where they dug. */
     static final double BESIDE = 1.5;
-    /** The largest box dug. */
-    static final int MAX_BOX = 32_768;
+    /**
+     * A box is dug in pieces: a band {@link #BAND} high of a square this wide - the bands from the
+     * top, in each the squares as a snake. Only the piece being dug is planned, so a box of any size
+     * costs what one piece does.
+     */
+    static final int SECTION = 32;
+    /** How often the body walks towards a piece's cells not loaded yet before they are left. */
+    static final int LOAD_TRIES = 2;
+    /** A walk towards cells not loaded yet ends this near them: the chunks come in on the way. */
+    static final double LOAD_NEAR = 8.0;
     /** How often one block may come back after it was broken - a block that breaks into another. */
     static final int MAX_DIGS_AT = 3;
     /** Drops are looked for this far around what was broken. */
@@ -157,6 +165,7 @@ final class AutoMiner {
               meridian.core.api.InteractionControl hands, Executor executor, Logger log) {
         this.hands = hands;
         this.debug = debug;
+        this.navigator = null;
         this.movement = movement;
         this.world = world;
         this.worker = worker;
@@ -164,6 +173,15 @@ final class AutoMiner {
         this.entities = entities;
         this.executor = executor;
         this.log = log;
+    }
+
+    /** Walks to the cells of a box not loaded yet; {@code null}: they are left. */
+    private meridian.core.api.Navigator navigator;
+
+    /** The navigator the job walks to a box's cells not loaded yet with. */
+    AutoMiner navigator(meridian.core.api.Navigator navigator) {
+        this.navigator = navigator;
+        return this;
     }
 
     /** Repairs a tool with a kit ({@link Options#repair}); {@code null} where core does not offer it. */
@@ -186,10 +204,6 @@ final class AutoMiner {
 
     /** Digs out the box, inside itself only, by its {@link #plan}. */
     CompletableFuture<Result> mine(BlockBox box, Options options) {
-        if (box.volume() > MAX_BOX) {
-            status = "The selection is too big: " + box.volume() + " blocks, at most " + MAX_BOX + ".";
-            return CompletableFuture.completedFuture(new Result(Status.NOTHING, 0, 0, 0, 0, 0));
-        }
         return start(new Job(job.incrementAndGet(), box, null, null, 0, 0, null, options));
     }
 
@@ -283,6 +297,20 @@ final class AutoMiner {
         BlockPos target;
         /** Whether the plan's rows run along x ({@link #rowsAlongX}). */
         boolean alongX;
+        /** The piece of the box being dug ({@link #SECTION}), its number, and how many there are. */
+        BlockBox piece;
+        long pieceAt;
+        long pieces = -1;
+        /** How often the body has walked towards the piece's cells not loaded yet. */
+        int loadTries;
+        /** Cells of the box left because they never loaded - too far, or no way to them. */
+        long notLoaded;
+        /** The sections across the box, and which corner the snake of them starts from. */
+        int nL;
+        int nS;
+        boolean piecesAlongX;
+        boolean lUp;
+        boolean sUp;
 
         Job(int id, BlockBox box, String name, Predicate<BlockView> type, int count, double radius, Vec3 from,
             Options options) {
@@ -676,16 +704,147 @@ final class AutoMiner {
             }
             return best;
         }
-        // A box goes by its plan, worked out once: the first block of it still there...
+        // A box goes piece by piece; a piece by its plan.
+        if (j.pieces < 0) {
+            pieces(j, me);
+        }
+        while (j.pieceAt < j.pieces) {
+            if (j.piece == null) {
+                j.piece = piece(j, j.pieceAt);
+                j.plan = null;
+                j.loadTries = 0;
+            }
+            Block b = nextIn(j, j.piece, me, last);
+            if (b != null) {
+                return b;
+            }
+            // Nothing known left in the piece: done - unless some of it is not loaded yet. Those
+            // cells are walked to (the chunks come in on the way), a few times at most, then left.
+            BlockPos unknown = unknownIn(j, j.piece, me);
+            if (unknown != null && j.loadTries < LOAD_TRIES && navigator != null && j.live()) {
+                j.loadTries++;
+                status = progress(j, "walking to where the selection is not loaded yet, " + text(unknown));
+                try {
+                    navigator.goTo(meridian.core.api.Goal.near(unknown, LOAD_NEAR)).get(5, TimeUnit.MINUTES);
+                } catch (Exception e) {
+                    log.info("auto-miner: the walk to {} failed: {}", text(unknown), e.toString());
+                }
+                me = movement.position();
+                if (me == null) {
+                    return null;
+                }
+                continue;
+            }
+            if (unknown != null) {
+                long n = countUnknown(j, j.piece);
+                j.notLoaded += n;
+                log.info("auto-miner: {} cell(s) of {} never loaded - left", n, j.piece);
+            }
+            j.pieceAt++;
+            j.piece = null;
+        }
+        return null;
+    }
+
+    /** The sections across the box and the corner the snake of them starts from - the body's. */
+    private void pieces(Job j, Vec3 me) {
+        BlockBox box = j.box;
+        j.piecesAlongX = rowsAlongX(box, me);
+        int lMin = j.piecesAlongX ? box.xMin() : box.zMin();
+        int lMax = j.piecesAlongX ? box.xMax() : box.zMax();
+        int sMin = j.piecesAlongX ? box.zMin() : box.xMin();
+        int sMax = j.piecesAlongX ? box.zMax() : box.xMax();
+        j.nL = Math.floorDiv(lMax - lMin, SECTION) + 1;
+        j.nS = Math.floorDiv(sMax - sMin, SECTION) + 1;
+        double fl = j.piecesAlongX ? me.x() : me.z();
+        double fs = j.piecesAlongX ? me.z() : me.x();
+        j.lUp = Math.abs(fl - (lMin + 0.5)) <= Math.abs(fl - (lMax + 0.5));
+        j.sUp = Math.abs(fs - (sMin + 0.5)) <= Math.abs(fs - (sMax + 0.5));
+        long bands = Math.floorDiv(box.yMax() - box.yMin(), BAND) + 1;
+        j.pieces = bands * j.nL * j.nS;
+    }
+
+    /**
+     * The piece number {@code n}: bands from the top; in a band the squares a row of them one way,
+     * the next back (a snake) from the body's corner; the next band snakes back from where the one
+     * above ended.
+     */
+    private static BlockBox piece(Job j, long n) {
+        BlockBox box = j.box;
+        long per = (long) j.nL * j.nS;
+        int band = (int) (n / per);
+        long k = n % per;
+        if (band % 2 == 1) {
+            k = per - 1 - k;
+        }
+        int si = (int) (k / j.nL);
+        int li = (int) (k % j.nL);
+        if (si % 2 == 1) {
+            li = j.nL - 1 - li;
+        }
+        if (!j.sUp) {
+            si = j.nS - 1 - si;
+        }
+        if (!j.lUp) {
+            li = j.nL - 1 - li;
+        }
+        int lMin = j.piecesAlongX ? box.xMin() : box.zMin();
+        int lMax = j.piecesAlongX ? box.xMax() : box.zMax();
+        int sMin = j.piecesAlongX ? box.zMin() : box.xMin();
+        int sMax = j.piecesAlongX ? box.zMax() : box.xMax();
+        int l0 = lMin + li * SECTION;
+        int l1 = Math.min(lMax, l0 + SECTION - 1);
+        int s0 = sMin + si * SECTION;
+        int s1 = Math.min(sMax, s0 + SECTION - 1);
+        int top = box.yMax() - band * BAND;
+        int bottom = Math.max(box.yMin(), top - BAND + 1);
+        return j.piecesAlongX ? BlockBox.of(l0, bottom, s0, l1, top, s1) : BlockBox.of(s0, bottom, l0, s1, top, l1);
+    }
+
+    /** The piece's cell not loaded yet nearest the body - not one left behind - or {@code null}. */
+    private BlockPos unknownIn(Job j, BlockBox piece, Vec3 me) {
+        BlockPos best = null;
+        double bestD = Double.MAX_VALUE;
+        for (int y = piece.yMax(); y >= piece.yMin(); y--) {
+            for (int x = piece.xMin(); x <= piece.xMax(); x++) {
+                for (int z = piece.zMin(); z <= piece.zMax(); z++) {
+                    if (!world.known(x, y, z) && !j.skipped.contains(new BlockPos(x, y, z))) {
+                        double d = Math.hypot(x + 0.5 - me.x(), z + 0.5 - me.z());
+                        if (d < bestD) {
+                            bestD = d;
+                            best = new BlockPos(x, y, z);
+                        }
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    private long countUnknown(Job j, BlockBox piece) {
+        long n = 0;
+        for (int y = piece.yMin(); y <= piece.yMax(); y++) {
+            for (int x = piece.xMin(); x <= piece.xMax(); x++) {
+                for (int z = piece.zMin(); z <= piece.zMax(); z++) {
+                    if (!world.known(x, y, z)) {
+                        n++;
+                    }
+                }
+            }
+        }
+        return n;
+    }
+
+    /** The next block of one piece of the box, by its plan; {@code null} when nothing known is left in it. */
+    private Block nextIn(Job j, BlockBox box, Vec3 me, BlockPos last) {
         if (j.plan == null) {
-            j.plan = plan(j.box, me);
-            j.alongX = rowsAlongX(j.box, me);
+            j.plan = plan(box, me);
+            j.alongX = rowsAlongX(box, me);
             j.planned = new HashMap<>();
             for (int i = 0; i < j.plan.size(); i++) {
                 j.planned.put(j.plan.get(i), i);
             }
         }
-        BlockBox box = j.box;
         Block planned = null;
         for (BlockPos p : j.plan) {
             Block b = left(j, p.x(), p.y(), p.z());
@@ -910,13 +1069,19 @@ final class AutoMiner {
         return b.isAir() ? null : b;
     }
 
-    /** How many of the blocks it came for are still there. */
+    /** A box bigger than this is not counted through for what is left: it would take seconds. */
+    static final long LEFT_COUNTED = 4_000_000;
+
+    /** How many of the blocks it came for are still there; {@code -1} for a box too big to count. */
     private int left(Job j) {
         if (j.box == null) {
             return j.count > 0 ? Math.max(0, j.count - j.dug) : 0;
         }
         int n = 0;
         BlockBox box = j.box;
+        if (box.volume() > LEFT_COUNTED) {
+            return -1;                        // too big to count each time: not known
+        }
         for (int y = box.yMin(); y <= box.yMax(); y++) {
             for (int x = box.xMin(); x <= box.xMax(); x++) {
                 for (int z = box.zMin(); z <= box.zMax(); z++) {
@@ -980,8 +1145,10 @@ final class AutoMiner {
     private static String progress(Job j, String doing) {
         String what = j.box != null ? "the selection"
                 : j.count > 0 ? j.dug + " of " + j.count + " " + j.name : j.dug + " " + j.name;
-        return "Mining " + what + ": " + j.broken.size() + " broken, " + j.skipped.size() + " left behind - " + doing
-                + ".";
+        String pieces = j.box != null && j.pieces > 1 ? ", piece " + (j.pieceAt + 1) + " of " + j.pieces : "";
+        String unloaded = j.notLoaded > 0 ? ", " + j.notLoaded + " never loaded" : "";
+        return "Mining " + what + pieces + ": " + j.broken.size() + " broken, " + j.skipped.size() + " left behind"
+                + unloaded + " - " + doing + ".";
     }
 
     private static String describe(Job j, Result r) {
@@ -995,9 +1162,10 @@ final class AutoMiner {
             return head + ".";
         }
         int inTheWay = Math.max(0, r.broken() - r.dug());
-        return String.format(Locale.ROOT, "%s: %d dug%s, %d left behind, %d drop(s) picked up%s%s.",
+        return String.format(Locale.ROOT, "%s: %d dug%s, %d left behind, %d drop(s) picked up%s%s%s.",
                 head, r.dug(), inTheWay > 0 ? " and " + inTheWay + " in the way" : "", r.skipped(), r.picked(),
                 r.unloaded() > 0 ? ", " + r.unloaded() + " item(s) into chests" : "",
-                r.left() > 0 ? ", " + r.left() + " still to dig" : "");
+                r.left() > 0 ? ", " + r.left() + " still to dig" : "",
+                j.notLoaded > 0 ? ", " + j.notLoaded + " cell(s) never loaded" : "");
     }
 }
