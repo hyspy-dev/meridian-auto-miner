@@ -70,8 +70,8 @@ final class AutoMiner {
     static final long SETTLE_MS = 800;
     /** A chest to unload into is looked for this far from the body. */
     static final double CHEST_AROUND = 32;
-    /** The most chests tried in one unloading. */
-    static final int CHESTS_TRIED = 8;
+    /** Every chest within the radius is looked at, nearest first - no count to stop at. */
+    static final int CHESTS_TRIED = Integer.MAX_VALUE;
     /** The player's own sections what the job dug can be in, by the names core keeps them under. */
     static final java.util.Set<String> CARRIED = java.util.Set.of("Hotbar", "Storage", "Backpack");
 
@@ -311,6 +311,8 @@ final class AutoMiner {
         Map<BlockPos, Integer> planned;
         /** Tools repaired with a kit. */
         int repairs;
+        /** Why the job stopped by itself, for the status; {@code null} when it did not. */
+        String why;
         /** Tools the server would not repair this job. */
         final Set<String> refused = new HashSet<>();
         /** The server teleported the player: the hold is to be taken again. */
@@ -382,6 +384,15 @@ final class AutoMiner {
                 }
                 if (j.options.unload() != Unload.OFF && full()) {
                     unload(j);
+                    if (full()) {
+                        // No room left in the inventory nor in any chest within reach: digging on would
+                        // only leave the drops on the ground. Stopped, saying so.
+                        j.why = "the inventory is full, and so is every chest within "
+                                + (int) j.options.chestRadius() + " blocks - make room, then Mine again";
+                        log.info("auto-miner: stopped: {}", j.why);
+                        j.stopped = true;
+                        break;
+                    }
                 }
                 Block target = next(j);
                 if (target == null) {
@@ -1276,7 +1287,7 @@ final class AutoMiner {
         String head = switch (r.status()) {
             case DONE -> "Done";
             case NOTHING -> j.box != null ? "Nothing to dig in the selection" : "No " + j.name + " about";
-            case INTERRUPTED -> "Stopped";
+            case INTERRUPTED -> j.why != null ? "Stopped (" + j.why + ")" : "Stopped";
             case NOT_AVAILABLE -> "Cannot move the player here";
         };
         if (r.status() == Status.NOTHING || r.status() == Status.NOT_AVAILABLE) {
