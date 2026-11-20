@@ -313,8 +313,11 @@ final class AutoMiner {
         int repairs;
         /** Why the job stopped by itself, for the status; {@code null} when it did not. */
         String why;
-        /** Tools the server would not repair this job. */
+        /** Tools the server would not repair this job: {@link #REPAIR_TRIES} tries in a row came to nothing. */
         final Set<String> refused = new HashSet<>();
+        /** Repairs of a tool that came to nothing in a row, and when the next try may be. */
+        final Map<String, Integer> repairFails = new HashMap<>();
+        final Map<String, Long> repairAgain = new HashMap<>();
         /** The server teleported the player: the hold is to be taken again. */
         volatile boolean teleported;
         int retakes;
@@ -727,7 +730,19 @@ final class AutoMiner {
                 break;
             }
             status = progress(j, "unloading into the chest at " + text(chest));
-            Map<String, Integer> moved = worker.deposit(chest, dug).get(5, TimeUnit.MINUTES);
+            java.util.Optional<Map<String, Integer>> opened;
+            try {
+                opened = worker.depositOpened(chest, dug).get(5, TimeUnit.MINUTES);
+            } catch (NoSuchMethodError olderCore) {
+                opened = java.util.Optional.of(worker.deposit(chest, dug).get(5, TimeUnit.MINUTES));
+            }
+            if (opened.isEmpty()) {
+                // Not opened - not got to, or the server would not open it (a guard wanting the head on
+                // it): nothing is known of it, full or not; the next chest.
+                log.info("auto-miner: the chest at {} did not open - the next one", text(chest));
+                continue;
+            }
+            Map<String, Integer> moved = opened.get();
             moved.forEach((item, n) -> {
                 j.unloaded += n;
                 dug.computeIfPresent(item, (k, v) -> v - n > 0 ? v - n : null);
@@ -1058,20 +1073,43 @@ final class AutoMiner {
             if (item.maxDurability() <= REPAIR_FLOOR && sameUseInOrder(hotbar, item)) {
                 continue;
             }
+            if (System.currentTimeMillis() < j.repairAgain.getOrDefault(item.id(), 0L)) {
+                continue;
+            }
             status = progress(j, "repairing " + item.id());
+            boolean done = false;
             try {
-                boolean done = Boolean.TRUE.equals(hands.repair(item.id()).get(20, TimeUnit.SECONDS));
-                log.info("auto-miner: {} {}", item.id(), done ? "repaired with a kit" : "not repaired");
-                if (done) {
-                    j.repairs++;
-                } else {
-                    j.refused.add(item.id());     // the server would not (the kit's toll too big): not again this job
-                }
+                done = Boolean.TRUE.equals(hands.repair(item.id()).get(20, TimeUnit.SECONDS));
             } catch (Exception e) {
                 log.info("auto-miner: repairing {} failed: {}", item.id(), e.toString());
             }
+            if (done) {
+                log.info("auto-miner: {} repaired with a kit", item.id());
+                j.repairs++;
+                j.repairFails.remove(item.id());
+                j.repairAgain.remove(item.id());
+                continue;
+            }
+            // A try that came to nothing is not yet the server saying no: the hands may have been
+            // taken in the middle of it (a guard turning to a mob switched the slot away from the kit
+            // - 20.11 the pickaxe broke so and the job dug stone with the hatchet for nine hours).
+            // Tried again a while later; only REPAIR_TRIES in a row mean the server will not.
+            int fails = j.repairFails.merge(item.id(), 1, Integer::sum);
+            if (fails >= REPAIR_TRIES) {
+                log.info("auto-miner: {} not repaired {} times in a row - left as it is this job", item.id(), fails);
+                j.refused.add(item.id());
+            } else {
+                log.info("auto-miner: {} not repaired (try {} of {}) - again in {} s", item.id(), fails, REPAIR_TRIES,
+                        REPAIR_AGAIN_MS / 1000);
+                j.repairAgain.put(item.id(), System.currentTimeMillis() + REPAIR_AGAIN_MS);
+            }
         }
     }
+
+    /** Repair tries in a row that come to nothing before a tool is left as it is for the job. */
+    static final int REPAIR_TRIES = 5;
+    /** How long after a repair that came to nothing it is tried again. */
+    static final long REPAIR_AGAIN_MS = 15_000;
 
     /** The most durability a repair leaves a tool at the least (the server's {@code RepairItemInteraction}). */
     static final double REPAIR_FLOOR = 10;
