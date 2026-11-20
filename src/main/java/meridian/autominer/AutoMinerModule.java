@@ -112,6 +112,7 @@ public class AutoMinerModule implements ProxyModule {
 
     @Override
     public void onEnable(ModuleContext ctx) {
+        adoptOldData(ctx, "meridian-auto-miner");
         Movement movement = ctx.services().require(Movement.class);
         World world = ctx.services().require(World.class);
         Worker worker = ctx.services().require(Worker.class);
@@ -375,5 +376,37 @@ public class AutoMinerModule implements ProxyModule {
         out.put("left", r.left());
         out.put("unloaded", r.unloaded());
         return out;
+    }
+
+    /**
+     * The module was named "meridian-auto-miner" before it took the family's name ("Meridian Auto Miner"); the proxy keeps a module's
+     * data under its name, so the old folder's files (the panel's settings and all) move over once.
+     * A file already in the new folder is kept.
+     */
+    static void adoptOldData(ModuleContext ctx, String oldName) {
+        try {
+            java.nio.file.Path now = ctx.getDataDir();
+            java.nio.file.Path oldDir = now.getParent().getParent().resolve(oldName);
+            java.nio.file.Path old = oldDir.resolve("data");
+            if (!java.nio.file.Files.isDirectory(old)) {
+                return;
+            }
+            int moved = 0;
+            try (var files = java.nio.file.Files.list(old)) {
+                for (java.nio.file.Path f : files.toList()) {
+                    java.nio.file.Path to = now.resolve(f.getFileName());
+                    if (!java.nio.file.Files.exists(to)) {
+                        java.nio.file.Files.move(f, to);
+                        moved++;
+                    }
+                }
+            }
+            try { java.nio.file.Files.delete(old); java.nio.file.Files.delete(oldDir); } catch (java.io.IOException notEmpty) { }
+            if (moved > 0) {
+                org.slf4j.LoggerFactory.getLogger("meridian-auto-miner").info("auto-miner: {} file(s) moved over from the old folder {}", moved, oldDir);
+            }
+        } catch (java.io.IOException | RuntimeException e) {
+            org.slf4j.LoggerFactory.getLogger("meridian-auto-miner").warn("auto-miner: the old folder's data could not be moved over: {}", e.toString());
+        }
     }
 }
