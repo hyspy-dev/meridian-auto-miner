@@ -531,21 +531,39 @@ final class AutoMiner {
         if (entities == null) {
             return;
         }
+        // Done when an item shows whose nearest broken block is the last one. An item merely near
+        // it is not enough: the cobble of the block before (one cell off, within DROP_FROM) used
+        // to end the wait, and the copper the server sent a moment later was left out of claim().
         BlockPos last = j.broken.get(j.broken.size() - 1);
-        for (long waited = 0; waited < SETTLE_MS; waited += 50) {
+        for (long waited = 0; waited < SETTLE_MS && j.live(); waited += 50) {
             for (int e : entities.trackedEntities()) {
-                if (j.lying.contains(e) || entities.itemOf(e).isEmpty()) {
+                if (j.lying.contains(e) || j.drops.contains(e) || entities.itemOf(e).isEmpty()) {
                     continue;
                 }
                 Vec3 first = entities.firstSeenAt(e).orElse(entities.positionOf(e).orElse(null));
-                if (first != null && Math.abs(first.x() - (last.x() + 0.5)) <= DROP_FROM
-                        && Math.abs(first.y() - (last.y() + 0.5)) <= DROP_FROM
-                        && Math.abs(first.z() - (last.z() + 0.5)) <= DROP_FROM) {
+                if (first != null && last.equals(nearestBroken(j, first))) {
                     return;
                 }
             }
             Thread.sleep(50);
         }
+    }
+
+    /** The broken block an item first seen at {@code at} came from: the nearest within DROP_FROM, or null. */
+    private static BlockPos nearestBroken(Job j, Vec3 at) {
+        BlockPos best = null;
+        double bestD = DROP_FROM * DROP_FROM;
+        for (BlockPos b : j.broken) {
+            double dx = at.x() - (b.x() + 0.5);
+            double dy = at.y() - (b.y() + 0.5);
+            double dz = at.z() - (b.z() + 0.5);
+            double d = dx * dx + dy * dy + dz * dz;
+            if (d <= bestD) {
+                bestD = d;
+                best = b;
+            }
+        }
+        return best;
     }
 
     /**
