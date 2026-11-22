@@ -214,6 +214,25 @@ final class AutoMiner {
     private final meridian.core.api.DebugRender debug;
     private volatile boolean showTarget = true;
 
+    /** Leaves the server ({@link Leaver}); {@code null} where core cannot - then the session stays. */
+    private java.util.function.Predicate<String> leaver;
+    /** The session leaves the server once a job has ended by itself ({@link #endedByItself}). */
+    private volatile boolean leaveWhenDone;
+
+    AutoMiner leaver(java.util.function.Predicate<String> leaver) {
+        this.leaver = leaver;
+        return this;
+    }
+
+    /** Asked at a job's end, not its start: ticked while it digs, it holds for that job too. */
+    void leaveWhenDone(boolean on) {
+        leaveWhenDone = on;
+    }
+
+    boolean leavesWhenDone() {
+        return leaveWhenDone;
+    }
+
     String status() {
         return status;
     }
@@ -257,23 +276,57 @@ final class AutoMiner {
         running = done;
         executor.execute(() -> {
             try {
-                // The one before gives its hold back first.
+                // The one before gives its hold back first: it was told to stop (its job is over, the
+                // worker's work cancelled), and ends where it is.
                 try {
-                    before.get(1, TimeUnit.MINUTES);
-                } catch (Exception ignored) {
-                    // ended badly or slowly: this one goes on
+                    before.get();
+                } catch (java.util.concurrent.ExecutionException ignored) {
+                    // it ended badly: this one goes on
                 }
                 Result r = run(j);
                 status = describe(j, r);
                 log.info("auto-miner: {}", status);
                 done.complete(r);
+                if (leaveWhenDone && endedByItself(j, r)) {
+                    leave();
+                }
             } catch (Throwable t) {
                 log.warn("auto-miner: mining failed", t);
+                job.compareAndSet(j.id, j.id + 1);
+                worker.cancel();        // nothing of it goes on digging by itself
                 status = "Failed: " + t;
                 done.completeExceptionally(t);
             }
         });
         return done;
+    }
+
+    /**
+     * The job came to its own end: everything dug, nothing there to dig, or no way to go on (no room
+     * left in the inventory nor in a chest). Not one that was stopped - the Stop button, another job,
+     * the player taking the body - and not a death: core sees to that one itself (back for the
+     * things, then out).
+     */
+    private static boolean endedByItself(Job j, Result r) {
+        return r.status() == Status.DONE || r.status() == Status.NOTHING || j.gaveUp;
+    }
+
+    /** "Disconnect after done": out of the server, as a player quitting. */
+    private void leave() {
+        String ended = status;
+        boolean left = false;
+        try {
+            left = leaver != null && leaver.test("the miner's job is over (" + ended + ")");
+        } catch (LinkageError olderCore) {
+            // a core that cannot leave
+        }
+        if (left) {
+            status = ended + " Left the server.";
+            log.info("auto-miner: left the server - the job is over");
+        } else {
+            status = ended + " Could not leave the server: this core does not offer it.";
+            log.warn("auto-miner: asked to leave the server once done - this core does not offer it");
+        }
     }
 
     // ------------------------------------------------------------------
@@ -291,6 +344,8 @@ final class AutoMiner {
         /** What the player held when it started, by item - the rest is what the job dug. */
         Map<String, Integer> start = Map.of();
         int unloaded;
+        /** Chests the last unloading got open: none, with the inventory full still, is no way to one. */
+        int chestsOpened;
         /** Blocks left behind: no place to break them from, lava beside, or they would not break. */
         final Set<BlockPos> skipped = new HashSet<>();
         /** Everything broken, those in the way too - where the drops lie. */
@@ -313,6 +368,8 @@ final class AutoMiner {
         int repairs;
         /** Why the job stopped by itself, for the status; {@code null} when it did not. */
         String why;
+        /** It stopped because it could not go on - no room for what it digs: an end of its own. */
+        boolean gaveUp;
         /** Tools the server would not repair this job: {@link #REPAIR_TRIES} tries in a row came to nothing. */
         final Set<String> refused = new HashSet<>();
         /** Repairs of a tool that came to nothing in a row, and when the next try may be. */
@@ -390,10 +447,14 @@ final class AutoMiner {
                     if (full()) {
                         // No room left in the inventory nor in any chest within reach: digging on would
                         // only leave the drops on the ground. Stopped, saying so.
-                        j.why = "the inventory is full, and so is every chest within "
-                                + (int) j.options.chestRadius() + " blocks - make room, then Mine again";
+                        j.why = j.chestsOpened == 0
+                                ? "the inventory is full, and no chest within " + (int) j.options.chestRadius()
+                                        + " blocks could be got to - set one up nearer, then Mine again"
+                                : "the inventory is full, and so is every chest within "
+                                        + (int) j.options.chestRadius() + " blocks - make room, then Mine again";
                         log.info("auto-miner: stopped: {}", j.why);
                         j.stopped = true;
+                        j.gaveUp = true;
                         break;
                     }
                 }
@@ -413,7 +474,7 @@ final class AutoMiner {
                 status = progress(j, "digging " + text(at));
                 j.target = at;
                 mark(at);
-                Worker.Dug d = worker.dig(at, access, tools).get(10, TimeUnit.MINUTES);
+                Worker.Dug d = worker.dig(at, access, tools).get();
                 j.broken.addAll(d.broken());
                 if (j.options.pickUp() == PickUp.ALL && !d.broken().isEmpty()) {
                     // Its drop taken as the job's while it is still in sight: once the body has
@@ -445,7 +506,7 @@ final class AutoMiner {
             if (j.live() && !j.broken.isEmpty() && j.options.pickUp() == PickUp.ALL) {
                 claim(j);
                 status = progress(j, "picking up all it dropped");
-                j.picked += worker.pickUp(j.drops).get(10, TimeUnit.MINUTES);
+                j.picked += worker.pickUp(j.drops).get();
             } else if (j.live() && !j.broken.isEmpty() && j.options.pickUp() != PickUp.NONE) {
                 pickUp(j);
             }
@@ -473,6 +534,10 @@ final class AutoMiner {
                 j.teleported = true;
                 log.info("auto-miner: the server teleported the player - the job goes on");
             } else {
+                if (why == Movement.Release.DEATH && job.get() == j.id) {
+                    j.why = "the player died";
+                    log.info("auto-miner: the player died - the job is over");
+                }
                 job.compareAndSet(j.id, j.id + 1);
             }
         });
@@ -599,7 +664,7 @@ final class AutoMiner {
     /** A round of picking up the drops around what was broken. */
     private void pickUp(Job j) throws Exception {
         status = progress(j, "picking up the drops");
-        j.picked += worker.pickUp(area(j.broken).grow(DROP_AROUND)).get(10, TimeUnit.MINUTES);
+        j.picked += worker.pickUp(area(j.broken).grow(DROP_AROUND)).get();
     }
 
     /** How many items lie on the ground in the area. */
@@ -715,6 +780,7 @@ final class AutoMiner {
         if (dug.isEmpty()) {
             return;
         }
+        j.chestsOpened = 0;
         List<BlockPos> chests = new ArrayList<>();
         if (j.options.unload() == Unload.CHOSEN) {
             BlockPos chosen = j.options.chest();
@@ -750,9 +816,11 @@ final class AutoMiner {
             status = progress(j, "unloading into the chest at " + text(chest));
             java.util.Optional<Map<String, Integer>> opened;
             try {
-                opened = worker.depositOpened(chest, dug).get(5, TimeUnit.MINUTES);
+                // However long the way to it is - a staircase out of the pit dug, rock between: it ends
+                // by getting there, by there being no way, or by the job being stopped.
+                opened = worker.depositOpened(chest, dug).get();
             } catch (NoSuchMethodError olderCore) {
-                opened = java.util.Optional.of(worker.deposit(chest, dug).get(5, TimeUnit.MINUTES));
+                opened = java.util.Optional.of(worker.deposit(chest, dug).get());
             }
             if (opened.isEmpty()) {
                 // Not opened - not got to, or the server would not open it (a guard wanting the head on
@@ -760,6 +828,7 @@ final class AutoMiner {
                 log.info("auto-miner: the chest at {} did not open - the next one", text(chest));
                 continue;
             }
+            j.chestsOpened++;
             Map<String, Integer> moved = opened.get();
             moved.forEach((item, n) -> {
                 j.unloaded += n;
@@ -860,7 +929,7 @@ final class AutoMiner {
                 j.loadTries++;
                 status = progress(j, "walking to where the selection is not loaded yet, " + text(unknown));
                 try {
-                    navigator.goTo(meridian.core.api.Goal.near(unknown, LOAD_NEAR)).get(5, TimeUnit.MINUTES);
+                    navigator.goTo(meridian.core.api.Goal.near(unknown, LOAD_NEAR)).get();
                 } catch (Exception e) {
                     log.info("auto-miner: the walk to {} failed: {}", text(unknown), e.toString());
                 }

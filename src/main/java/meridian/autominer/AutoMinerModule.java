@@ -22,12 +22,14 @@ import meridian.core.api.World;
  * it is core's {@link Worker}. In the proxy's window: the Mine section - what to dig, a shovel for
  * soil, when the drops are picked up, a chest to unload into. On the command channel:
  * {@code mine <conn> box <x y z x y z> | selection | blocks <name> [count] | cancel}, and
- * {@code mine <conn> set shovel on|off | pickup none|end|every <n> | unload off|nearest|chest <x y z>}.
+ * {@code mine <conn> set shovel on|off | pickup none|end|every <n> | unload off|nearest|chest <x y z>
+ * | disconnect on|off} - the last: out of the server once a job has ended by itself.
  */
 public class AutoMinerModule implements ProxyModule {
 
     private static final String USAGE = "box <x y z x y z> | selection | blocks <name> [count, -1 no end] | cancel"
-            + " | set shovel on|off | set pickup none|end|every <n>|all | set unload off|nearest|chest <x y z>";
+            + " | set shovel on|off | set pickup none|end|every <n>|all | set unload off|nearest|chest <x y z>"
+            + " | set disconnect on|off";
 
     /** When the drops are picked up, as the panel offers it. */
     enum PickUpChoice {
@@ -104,11 +106,14 @@ public class AutoMinerModule implements ProxyModule {
     private volatile boolean drill;
     /** How far chests are looked for: from the body (the nearest), from the chosen chest (by it). */
     private volatile int chestRadius = (int) AutoMiner.CHEST_AROUND;
+    /** Leave the server once a job has ended by itself - dug out, nothing to dig, no room left. */
+    private volatile boolean disconnect;
     /** The selection last seen - a setting kept like the others: it outlives the session. */
     private volatile BlockBox kept;
     private final SettingBinding<String> keptSetting = new SettingBinding<>();   // no start value: the saved one stands
     /** The chosen chest, a setting kept like the others; set by the button or the command. */
     private final SettingBinding<String> chestSetting = new SettingBinding<>();
+    private volatile AutoMiner miner;
 
     @Override
     public void onEnable(ModuleContext ctx) {
@@ -126,6 +131,12 @@ public class AutoMinerModule implements ProxyModule {
                 ctx.services().get(meridian.core.api.InteractionControl.class).orElse(null), ctx.offloadExecutor(),
                 ctx.getLogger());
         miner.navigator(ctx.services().get(meridian.core.api.Navigator.class).orElse(null)).containers(containers);
+        try {
+            miner.leaver(Leaver.of(ctx));
+        } catch (LinkageError olderCore) {
+            // a core with no way to leave the server: "Disconnect after done" says so when it comes to it
+        }
+        this.miner = miner;
         if (selection != null) {
             selection.onSelection(b -> {
                 if (b != null) {
@@ -171,6 +182,10 @@ public class AutoMinerModule implements ProxyModule {
                     showTarget = v;
                     miner.showTarget(v);
                 })
+                .bool("mineDisconnect", "Disconnect after done", disconnect, v -> {
+                    disconnect = v;
+                    miner.leaveWhenDone(v);
+                })
                 .button("Mine", () -> mine(miner, selection))
                 .button("Stop", () -> {
                     note = "";
@@ -180,7 +195,8 @@ public class AutoMinerModule implements ProxyModule {
         // Kept across restarts, every choice of the panel: saved values come back through the same
         // setters at the start.
         spec.persistent("mineMode", "mineName", "mineCount", "mineShovel", "minePickUp", "minePickUpEvery",
-                "mineUnload", "mineShowTarget", "mineRepair", "mineDrill", "mineKept", "mineChest", "mineChestRadius");
+                "mineUnload", "mineShowTarget", "mineRepair", "mineDrill", "mineKept", "mineChest", "mineChestRadius",
+                "mineDisconnect");
         if (selection != null) {
             spec.persistent("selectionTool");
         }
@@ -287,6 +303,10 @@ public class AutoMinerModule implements ProxyModule {
             case "shovel" -> shovel = value.equals("on") || value.equals("true");
             case "repair" -> repair = value.equals("on") || value.equals("true");
             case "drill" -> drill = value.equals("on") || value.equals("true");
+            case "disconnect" -> {
+                disconnect = value.equals("on") || value.equals("true");
+                miner.leaveWhenDone(disconnect);
+            }
             case "pickup" -> {
                 pickUp = switch (value) {
                     case "none" -> AutoMiner.PickUp.NONE;
@@ -320,6 +340,7 @@ public class AutoMinerModule implements ProxyModule {
         out.put("every", every);
         out.put("unload", unload.name());
         out.put("chest", chest);
+        out.put("disconnect", disconnect);
         return CompletableFuture.completedFuture(out);
     }
 

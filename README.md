@@ -48,6 +48,11 @@ is still named `meridian-navigation`: the navigation it once held is core's now.
   does (core's `InteractionControl.repair`).
 - **Outline the block being dug**, on by default: the block the job goes to dig now is outlined in
   orange, through walls (core's `DebugRender`).
+- **Disconnect after done** (off): the session leaves the server, as a player quitting does (core's
+  `Life.leave`), once a job has come to its own end - everything dug, nothing there to dig, or no
+  room left in the inventory nor in any chest. A job that was stopped (Stop, another job, a key that
+  moves the player) leaves the session in; so does a death - core goes back for the things, then
+  leaves by itself. The tick is asked at the job's end: set while it digs, it holds for that job.
 - **Mine** and **Stop**. The **Mining** line says how it goes.
 
 Blocks by name go the way a player digs, block by block: of the blocks of the kind, the one
@@ -80,6 +85,7 @@ mine <conn> cancel
 mine <conn> set shovel on|off
 mine <conn> set pickup none|end|every <n>|all
 mine <conn> set unload off|nearest|chest <x y z>
+mine <conn> set disconnect on|off              -> out of the server once a job has ended by itself
 ```
 
 ## Not yet
