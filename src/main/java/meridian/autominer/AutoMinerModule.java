@@ -23,13 +23,14 @@ import meridian.core.api.World;
  * soil, when the drops are picked up, a chest to unload into. On the command channel:
  * {@code mine <conn> box <x y z x y z> | selection | blocks <name> [count] | cancel}, and
  * {@code mine <conn> set shovel on|off | pickup none|end|every <n> | unload off|nearest|chest <x y z>
- * | disconnect on|off} - the last: out of the server once a job has ended by itself.
+ * | disconnect on|off | cover on|off} - {@code disconnect}: out of the server once a job has ended
+ * by itself; {@code cover}: a selection's floor covered with rubble as it is dug, so nothing spawns on it.
  */
 public class AutoMinerModule implements ProxyModule {
 
     private static final String USAGE = "box <x y z x y z> | selection | blocks <name> [count, -1 no end] | cancel"
             + " | set shovel on|off | set pickup none|end|every <n>|all | set unload off|nearest|chest <x y z>"
-            + " | set disconnect on|off";
+            + " | set disconnect on|off | set cover on|off";
 
     /** When the drops are picked up, as the panel offers it. */
     enum PickUpChoice {
@@ -108,6 +109,8 @@ public class AutoMinerModule implements ProxyModule {
     private volatile int chestRadius = (int) AutoMiner.CHEST_AROUND;
     /** Leave the server once a job has ended by itself - dug out, nothing to dig, no room left. */
     private volatile boolean disconnect;
+    /** Cover a selection's floor with rubble as it is dug: nothing spawns on a covered floor. */
+    private volatile boolean cover;
     /** The selection last seen - a setting kept like the others: it outlives the session. */
     private volatile BlockBox kept;
     private final SettingBinding<String> keptSetting = new SettingBinding<>();   // no start value: the saved one stands
@@ -160,7 +163,8 @@ public class AutoMinerModule implements ProxyModule {
                 .string("mineName", "Blocks (a part of the name)", name, v -> name = v == null ? "" : v.trim())
                 .int_("mineCount", "How many to dig (-1: no end)", -1, 100000, count, v -> count = v)
                 .bool("mineShovel", "Shovel for dirt, gravel and sand", shovel, v -> shovel = v)
-                .bool("mineRepair", "Repair a broken tool with a kit from the hotbar", repair, v -> repair = v)
+                .bool("mineRepair", "Repair a broken tool with a kit it carries", repair, v -> repair = v)
+                .bool("mineCover", "Cover with rubble to prevent spawn", cover, v -> cover = v)
                 .bool("mineDrill", "Use the drill (2x2 a swing) where it pays", drill, v -> drill = v)
                 .enum_("minePickUp", "Pick up the drops", PickUpChoice.class, PickUpChoice.AT_END,
                         v -> pickUp = v.mode)
@@ -196,7 +200,7 @@ public class AutoMinerModule implements ProxyModule {
         // setters at the start.
         spec.persistent("mineMode", "mineName", "mineCount", "mineShovel", "minePickUp", "minePickUpEvery",
                 "mineUnload", "mineShowTarget", "mineRepair", "mineDrill", "mineKept", "mineChest", "mineChestRadius",
-                "mineDisconnect");
+                "mineDisconnect", "mineCover");
         if (selection != null) {
             spec.persistent("selectionTool");
         }
@@ -206,7 +210,7 @@ public class AutoMinerModule implements ProxyModule {
 
     /** How a job goes, as the panel (or the command channel) set it. */
     private AutoMiner.Options options() {
-        return new AutoMiner.Options(shovel, pickUp, every, unload, chest, repair, drill, chestRadius);
+        return new AutoMiner.Options(shovel, pickUp, every, unload, chest, repair, drill, chestRadius, cover);
     }
 
     /** Mines what the mode says; the Mining line says how it goes. */
@@ -303,6 +307,7 @@ public class AutoMinerModule implements ProxyModule {
             case "shovel" -> shovel = value.equals("on") || value.equals("true");
             case "repair" -> repair = value.equals("on") || value.equals("true");
             case "drill" -> drill = value.equals("on") || value.equals("true");
+            case "cover" -> cover = value.equals("on") || value.equals("true");
             case "disconnect" -> {
                 disconnect = value.equals("on") || value.equals("true");
                 miner.leaveWhenDone(disconnect);
@@ -341,6 +346,7 @@ public class AutoMinerModule implements ProxyModule {
         out.put("unload", unload.name());
         out.put("chest", chest);
         out.put("disconnect", disconnect);
+        out.put("cover", cover);
         return CompletableFuture.completedFuture(out);
     }
 
@@ -396,6 +402,8 @@ public class AutoMinerModule implements ProxyModule {
         out.put("picked", r.picked());
         out.put("left", r.left());
         out.put("unloaded", r.unloaded());
+        out.put("covered", r.covered());
+        out.put("bare", r.bare());
         return out;
     }
 

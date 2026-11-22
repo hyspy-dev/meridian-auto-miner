@@ -43,9 +43,23 @@ is still named `meridian-navigation`: the navigation it once held is core's now.
   - **Keep it** (the default).
   - **The nearest chest with room**: chests within 32 blocks, nearest first, until all of it is in.
   - **The chosen chest**: open it in the game, then press **Choose the chest I opened last**.
-- **Repair a broken tool with a kit from the hotbar** (off): before each block, a tool in the hotbar
-  with under 2% of its durability left is repaired with a `Repair_Kit` from the hotbar, as a player
-  does (core's `InteractionControl.repair`).
+- **Repair a broken tool with a kit it carries** (off): before each block, a tool in the hotbar
+  with under 2% of its durability left is repaired with a `Repair_Kit`, as a player does (core's
+  `InteractionControl.repair`). The kit may lie in the hotbar, the storage or the backpack: one that
+  is not in the hotbar is taken into a hotbar slot for the repair - a free one, else in place of an
+  item that is neither in hand nor being repaired - and put back where it lay after, that item with
+  it; the tool is in hand again. (The server repairs only what is in the hotbar or the utility slot,
+  with the kit in hand.)
+- **Cover with rubble to prevent spawn** (off; a selection only): the floor a band of the digging
+  leaves bare is covered with rubble as it goes - a `Rubble_*` of any kind the bot carries, one on
+  each cell - so that nothing spawns on it: a mob wants rock or soil under it and room over it, and
+  a rubble is neither. When the band under it is dug, the rubble standing on a block is taken up
+  with a use first (it is not dug) and put down again on the floor below; the box's footprint in
+  rubble is what one floor takes. A rubble is put down crouching - used standing, it is thrown. Out
+  of rubble, the bot picks up any that came down with a block and lies about, then fetches more
+  from the chests it unloads into (as much as the floor takes), and with none there digs on: the
+  status says how many cells were left bare, and why. The rubble is never unloaded into the chests.
+  It needs a hotbar slot: one already there, or a free slot for a stack from the storage.
 - **Outline the block being dug**, on by default: the block the job goes to dig now is outlined in
   orange, through walls (core's `DebugRender`).
 - **Disconnect after done** (off): the session leaves the server, as a player quitting does (core's
@@ -86,6 +100,7 @@ mine <conn> set shovel on|off
 mine <conn> set pickup none|end|every <n>|all
 mine <conn> set unload off|nearest|chest <x y z>
 mine <conn> set disconnect on|off              -> out of the server once a job has ended by itself
+mine <conn> set cover on|off                   -> the floor covered with rubble as it is dug
 ```
 
 ## Not yet

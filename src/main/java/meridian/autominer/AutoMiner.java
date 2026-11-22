@@ -113,19 +113,26 @@ final class AutoMiner {
      * @param every  with {@link PickUp#EVERY}, how many items on the ground make a round of picking up
      * @param unload where what the job dug goes, when the inventory is full and at the end
      * @param chest  with {@link Unload#CHOSEN}, the chest
+     * @param cover  a box's floor is covered with rubble as it is dug, so that nothing spawns on it
+     *               ({@link #cover})
      */
     record Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest, boolean repair,
-                   boolean drill, double chestRadius) {
+                   boolean drill, double chestRadius, boolean cover) {
 
         static final Options DEFAULT = new Options(true, PickUp.AT_END, 20, Unload.OFF, null, false, false,
-                CHEST_AROUND);
+                CHEST_AROUND, false);
 
         Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest) {
-            this(shovel, pickUp, every, unload, chest, false, false, CHEST_AROUND);
+            this(shovel, pickUp, every, unload, chest, false, false, CHEST_AROUND, false);
         }
 
         Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest, boolean repair) {
-            this(shovel, pickUp, every, unload, chest, repair, false, CHEST_AROUND);
+            this(shovel, pickUp, every, unload, chest, repair, false, CHEST_AROUND, false);
+        }
+
+        Options(boolean shovel, PickUp pickUp, int every, Unload unload, BlockPos chest, boolean repair,
+                boolean drill, double chestRadius) {
+            this(shovel, pickUp, every, unload, chest, repair, drill, chestRadius, false);
         }
 
         /**
@@ -153,10 +160,15 @@ final class AutoMiner {
      * those it came for, the ones it left, the drops it picked up, and how many of those it came for
      * are still there.
      */
-    record Result(Status status, int broken, int dug, int skipped, int picked, int left, int unloaded) {
+    record Result(Status status, int broken, int dug, int skipped, int picked, int left, int unloaded, int covered,
+                  int bare) {
 
         Result(Status status, int broken, int dug, int skipped, int picked, int left) {
-            this(status, broken, dug, skipped, picked, left, 0);
+            this(status, broken, dug, skipped, picked, left, 0, 0, 0);
+        }
+
+        Result(Status status, int broken, int dug, int skipped, int picked, int left, int unloaded) {
+            this(status, broken, dug, skipped, picked, left, unloaded, 0, 0);
         }
     }
 
@@ -274,6 +286,20 @@ final class AutoMiner {
         CompletableFuture<Result> before = running;
         CompletableFuture<Result> done = new CompletableFuture<>();
         running = done;
+        try {
+            runJob(j, before, done);
+        } catch (java.util.concurrent.RejectedExecutionException over) {
+            // The module's own session is over - its runtime shut down: a button of a settings page
+            // left open from it (22.11, a proxy window that kept the page across a reconnect).
+            running = before;
+            status = "Not connected: this page is of a session that is over - open the module's settings again.";
+            log.warn("auto-miner: asked to mine after its session was shut down");
+            done.complete(new Result(Status.NOT_AVAILABLE, 0, 0, 0, 0, 0));
+        }
+        return done;
+    }
+
+    private void runJob(Job j, CompletableFuture<Result> before, CompletableFuture<Result> done) {
         executor.execute(() -> {
             try {
                 // The one before gives its hold back first: it was told to stop (its job is over, the
@@ -298,7 +324,6 @@ final class AutoMiner {
                 done.completeExceptionally(t);
             }
         });
-        return done;
     }
 
     /**
@@ -370,6 +395,17 @@ final class AutoMiner {
         String why;
         /** It stopped because it could not go on - no room for what it digs: an end of its own. */
         boolean gaveUp;
+        /** Floor cells bare and not covered yet ({@link Options#cover}), in the order they came bare. */
+        final java.util.LinkedHashSet<BlockPos> bare = new java.util.LinkedHashSet<>();
+        /** Rubble put down on the floor; taken up again with a use. */
+        int covered;
+        int takenUp;
+        /** Floor cells left bare - no rubble for them, or it would not go down: not gone back to. */
+        final Set<BlockPos> leftBare = new HashSet<>();
+        /** Why the floor is being left bare, said once: no rubble, no hotbar slot for it. */
+        String bareWhy;
+        /** This core cannot cover (too old to take rubble up with a use): the job digs on without. */
+        boolean cannotCover;
         /** Tools the server would not repair this job: {@link #REPAIR_TRIES} tries in a row came to nothing. */
         final Set<String> refused = new HashSet<>();
         /** Repairs of a tool that came to nothing in a row, and when the next try may be. */
@@ -471,11 +507,24 @@ final class AutoMiner {
                 if (j.options.repair()) {
                     repairBroken(j);
                 }
+                if (covers(j)) {
+                    uncover(j, at);
+                    if (!j.live()) {
+                        break;
+                    }
+                }
                 status = progress(j, "digging " + text(at));
                 j.target = at;
                 mark(at);
                 Worker.Dug d = worker.dig(at, access, tools).get();
                 j.broken.addAll(d.broken());
+                if (covers(j)) {
+                    for (BlockPos p : d.broken()) {
+                        if (j.box.contains(p.x(), p.y(), p.z()) && floorOfBand(j.box, p.y())) {
+                            j.bare.add(p);
+                        }
+                    }
+                }
                 if (j.options.pickUp() == PickUp.ALL && !d.broken().isEmpty()) {
                     // Its drop taken as the job's while it is still in sight: once the body has
                     // gone on and it is out of view, it comes back as an item like any other.
@@ -499,6 +548,9 @@ final class AutoMiner {
                         && lyingAbout(area(j.broken).grow(DROP_AROUND)) >= j.options.every()) {
                     pickUp(j);
                 }
+                if (j.live() && covers(j)) {
+                    cover(j, false);
+                }
             }
             if (j.live() && !j.broken.isEmpty() && j.options.pickUp() != PickUp.NONE) {
                 settle(j);
@@ -510,11 +562,15 @@ final class AutoMiner {
             } else if (j.live() && !j.broken.isEmpty() && j.options.pickUp() != PickUp.NONE) {
                 pickUp(j);
             }
+            if (j.live() && covers(j)) {
+                cover(j, true);         // what is left bare - the cell the body stood in too
+            }
             if (j.live() && j.options.unload() != Unload.OFF) {
                 unload(j);
             }
             Status s = !j.live() ? Status.INTERRUPTED : found == 0 ? Status.NOTHING : Status.DONE;
-            return new Result(s, j.broken.size(), j.dug, j.skipped.size(), j.picked, left(j), j.unloaded);
+            return new Result(s, j.broken.size(), j.dug, j.skipped.size(), j.picked, left(j), j.unloaded, j.covered,
+                    j.leftBare.size() + j.bare.size());
         } finally {
             unmark();
             wheel[0].release();
@@ -736,6 +792,9 @@ final class AutoMiner {
                 if (contents != null && contents.items().size() < contents.capacity() && fullChests.remove(block)) {
                     log.info("auto-miner: the chest at {} has room again", text(block));
                 }
+                if (contents != null && contents.items().values().stream().anyMatch(i -> i != null && rubble(i.id()))) {
+                    noRubble.remove(block);
+                }
             });
         }
         return this;
@@ -745,7 +804,7 @@ final class AutoMiner {
         Map<String, Integer> dug = new HashMap<>();
         carried().forEach((item, n) -> {
             int more = n - j.start.getOrDefault(item, 0);
-            if (more > 0) {
+            if (more > 0 && !(covers(j) && rubble(item))) {     // the rubble is the floor's, not the chest's
                 dug.put(item, more);
             }
         });
@@ -764,6 +823,9 @@ final class AutoMiner {
         meridian.core.api.Player p = world.player().orElse(null);
         Map<String, Integer> stuff = new HashMap<>();
         carried().forEach((item, n) -> {
+            if (covers(j) && rubble(item)) {
+                return;                 // what the floor is covered with stays
+            }
             if (item.startsWith("Ore_") || item.startsWith("Ingredient_Bar_") || (p != null && p.placesBlock(item))) {
                 stuff.put(item, n);
             }
@@ -781,6 +843,17 @@ final class AutoMiner {
             return;
         }
         j.chestsOpened = 0;
+        List<BlockPos> chests = chests(j);
+        // The chests found full come last: tried again only when the others did not take it all - one
+        // may have been emptied, or broken and set up anew, out of the player's sight.
+        List<BlockPos> order = new ArrayList<>();
+        chests.stream().filter(c -> !fullChests.contains(c)).forEach(order::add);
+        chests.stream().filter(fullChests::contains).forEach(order::add);
+        unloadInto(j, dug, order);
+    }
+
+    /** The chests of the job: the chosen one and those by it, or those round the body - nearest first. */
+    private List<BlockPos> chests(Job j) {
         List<BlockPos> chests = new ArrayList<>();
         if (j.options.unload() == Unload.CHOSEN) {
             BlockPos chosen = j.options.chest();
@@ -804,11 +877,10 @@ final class AutoMiner {
                 }
             }
         }
-        // The chests found full come last: tried again only when the others did not take it all - one
-        // may have been emptied, or broken and set up anew, out of the player's sight.
-        List<BlockPos> order = new ArrayList<>();
-        chests.stream().filter(c -> !fullChests.contains(c)).forEach(order::add);
-        chests.stream().filter(fullChests::contains).forEach(order::add);
+        return chests;
+    }
+
+    private void unloadInto(Job j, Map<String, Integer> dug, List<BlockPos> order) throws Exception {
         for (BlockPos chest : order) {
             if (!j.live() || dug.isEmpty()) {
                 break;
@@ -943,6 +1015,9 @@ final class AutoMiner {
                 long n = countUnknown(j, j.piece);
                 j.notLoaded += n;
                 log.info("auto-miner: {} cell(s) of {} never loaded - left", n, j.piece);
+            }
+            if (covers(j)) {
+                sweep(j, j.piece);
             }
             j.pieceAt++;
             j.piece = null;
@@ -1131,9 +1206,10 @@ final class AutoMiner {
     }
 
     /**
-     * Repairs, with a kit from the hotbar (core's {@code InteractionControl.repair}), each tool in the
-     * hotbar that is broken - or all but: under {@link #BROKEN} of its durability left. Nothing without
-     * a kit.
+     * Repairs, with a kit it carries (core's {@code InteractionControl.repair}: one in the hotbar, else
+     * one from the storage or the backpack - taken into the hand for the repair and put back, the tool
+     * in hand again after), each tool in the hotbar that is broken - or all but: under {@link #BROKEN}
+     * of its durability left. Nothing without a kit.
      */
     private void repairBroken(Job j) {
         if (hands == null || inventory == null) {
@@ -1143,8 +1219,7 @@ final class AutoMiner {
         if (hotbar == null) {
             return;
         }
-        boolean kit = hotbar.items().values().stream().anyMatch(i -> i != null && i.id() != null
-                && i.id().contains("Repair_Kit"));
+        boolean kit = carried().keySet().stream().anyMatch(id -> id != null && id.contains("Repair_Kit"));
         if (!kit) {
             return;
         }
@@ -1317,13 +1392,253 @@ final class AutoMiner {
         return v < min ? min - v : v > max + 1 ? v - (max + 1) : 0;
     }
 
-    /** The box's block at a cell still to dig - known, not air, not left behind - or {@code null}. */
+    /**
+     * The box's block at a cell still to dig - known, not air, not left behind - or {@code null}. A
+     * rubble on a floor being covered is no block to dig: it is the cover.
+     */
     private Block left(Job j, int x, int y, int z) {
         if (j.skipped.contains(new BlockPos(x, y, z)) || !world.known(x, y, z)) {
             return null;
         }
         Block b = world.blockAt(x, y, z);
-        return b.isAir() ? null : b;
+        return b.isAir() || (covers(j) && rubble(b)) ? null : b;
+    }
+
+    // ------------------------------------------------------------------
+    // The floor covered with rubble
+    // ------------------------------------------------------------------
+
+    /**
+     * Whether the job covers the floor it digs bare ({@link Options#cover}): a box's job, on a core
+     * that can. Mobs spawn on rock and soil with room over it; a rubble on it is neither - its cell is
+     * taken, and it is no block they spawn on ({@code SpawnBlockSet}: {@code Rock*}, {@code Soil*}).
+     */
+    private static boolean covers(Job j) {
+        return j.options.cover() && j.box != null && !j.cannotCover;
+    }
+
+    /** A rubble, by its item (and block) id: {@code Rubble_Stone}, {@code Rubble_Basalt_Medium}, ... */
+    static boolean rubble(String id) {
+        return id != null && id.startsWith("Rubble_");
+    }
+
+    private static boolean rubble(Block b) {
+        return b != null && !b.isAir() && b.type() != null && rubble(b.type().name());
+    }
+
+    /** Whether a height is the lowest of its band of the box: the cell whose floor the band leaves bare. */
+    static boolean floorOfBand(BlockBox box, int y) {
+        return y == box.yMin() || band(box, y - 1) != band(box, y);
+    }
+
+    /**
+     * Before a block is dug: the rubble standing on it - the cover of the floor above, now being dug
+     * away - is taken up with a use, as a player picks a rubble up, and goes on the floor under it
+     * after. One that will not be taken up comes down with the block and is picked up with the drops.
+     */
+    private void uncover(Job j, BlockPos at) throws Exception {
+        BlockPos above = new BlockPos(at.x(), at.y() + 1, at.z());
+        if (!world.known(above.x(), above.y(), above.z()) || !rubble(world.blockAt(above.x(), above.y(), above.z()))) {
+            return;
+        }
+        status = progress(j, "taking up the rubble at " + text(above));
+        try {
+            Worker.Outcome o = worker.gather(above).get();
+            if (o == Worker.Outcome.TAKEN) {
+                j.takenUp++;
+            } else if (o == Worker.Outcome.NOT_AVAILABLE) {
+                cannotCover(j, "it takes no rubble up with a use");
+            } else {
+                log.info("auto-miner: the rubble at {} was not taken up ({}) - it comes down with the block", text(above), o);
+            }
+        } catch (LinkageError olderCore) {
+            cannotCover(j, "it is too old to take rubble up with a use");
+        }
+    }
+
+    private void cannotCover(Job j, String why) {
+        j.cannotCover = true;
+        j.leftBare.addAll(j.bare);
+        j.bare.clear();
+        log.warn("auto-miner: the floor is not covered - this core cannot: {}", why);
+    }
+
+    /**
+     * The floor cells dug bare are covered: a rubble put on each, from where the body stands when it
+     * reaches, else from a step away. The cell the body stands in waits until it has moved on - or,
+     * {@code all}, is covered too (the job's end: the worker steps out of it). A cell with something
+     * in it already, or nothing under it to put a rubble on, is no floor to cover.
+     *
+     * <p>With no rubble carried it is fetched from the job's chests, as much as the box's floor takes;
+     * with none there either the floor stays bare, and the job digs on.
+     */
+    private void cover(Job j, boolean all) throws Exception {
+        if (j.bare.isEmpty()) {
+            return;
+        }
+        Vec3 me = movement.position();
+        List<BlockPos> waiting = new ArrayList<>();
+        java.util.ArrayDeque<BlockPos> todo = new java.util.ArrayDeque<>(j.bare);
+        j.bare.clear();
+        try {
+            while (!todo.isEmpty() && j.live() && !j.cannotCover) {
+                BlockPos cell = todo.poll();
+                if (!world.known(cell.x(), cell.y(), cell.z()) || !world.blockAt(cell.x(), cell.y(), cell.z()).isAir()) {
+                    continue;                           // covered already, or filled again
+                }
+                if (!world.known(cell.x(), cell.y() - 1, cell.z())
+                        || world.blockAt(cell.x(), cell.y() - 1, cell.z()).isAir()) {
+                    continue;                           // a hole: nothing to put a rubble on, nothing to spawn on
+                }
+                if (!all && me != null && (int) Math.floor(me.x()) == cell.x() && (int) Math.floor(me.z()) == cell.z()
+                        && Math.abs(me.y() - cell.y()) < 1.5) {
+                    waiting.add(cell);                  // under the body: once it has moved on
+                    continue;
+                }
+                String item = rubbleCarried();
+                if (item == null && (pickUpRubble(j) || fetchRubble(j))) {
+                    item = rubbleCarried();
+                    me = movement.position();
+                }
+                if (item == null) {
+                    bare(j, cell, "no rubble left"
+                            + (j.options.unload() == Unload.OFF ? " (and no chests set to take more from)" : ", none in the chests"));
+                    continue;
+                }
+                status = progress(j, "covering the floor at " + text(cell));
+                Worker.Outcome o = worker.place(cell, item, -1).get();
+                if (o == Worker.Outcome.PLACED) {
+                    j.covered++;
+                } else if (o == Worker.Outcome.INTERRUPTED) {
+                    waiting.add(cell);
+                    break;
+                } else if (o == Worker.Outcome.NO_ITEM) {
+                    // Carried, and not to be got into the hand: the hotbar has no slot for it.
+                    bare(j, cell, "no free hotbar slot to take the rubble into");
+                } else if (o == Worker.Outcome.NOT_AVAILABLE) {
+                    cannotCover(j, "it places no blocks");
+                } else {
+                    j.leftBare.add(cell);
+                    log.info("auto-miner: no rubble went down at {} ({})", text(cell), o);
+                }
+            }
+        } catch (LinkageError olderCore) {
+            cannotCover(j, "it is too old to cover a floor");
+        } finally {
+            if (!j.cannotCover) {
+                j.bare.addAll(waiting);
+                j.bare.addAll(todo);            // stopped half-way: what was not got to
+            }
+        }
+    }
+
+    /**
+     * A band of a piece of the box is done: every cell of its floor still bare goes to be covered -
+     * those the job did not dig too: a cave crossing the box left them empty before it came, and a mob
+     * spawns there as well as on what was dug. Water in a cell is no floor to put a rubble on.
+     */
+    private void sweep(Job j, BlockBox piece) {
+        int y = piece.yMin();
+        if (!floorOfBand(j.box, y)) {
+            return;
+        }
+        for (int x = piece.xMin(); x <= piece.xMax(); x++) {
+            for (int z = piece.zMin(); z <= piece.zMax(); z++) {
+                BlockPos cell = new BlockPos(x, y, z);
+                if (!j.leftBare.contains(cell) && world.known(x, y, z) && world.known(x, y - 1, z)
+                        && world.blockAt(x, y, z).isAir() && !world.blockAt(x, y - 1, z).isAir()
+                        && world.fluidAt(x, y, z) == null) {
+                    j.bare.add(cell);
+                }
+            }
+        }
+    }
+
+    /** A floor cell left bare, and why - said once for each reason. */
+    private void bare(Job j, BlockPos cell, String why) {
+        j.leftBare.add(cell);
+        if (!why.equals(j.bareWhy)) {
+            j.bareWhy = why;
+            log.info("auto-miner: the floor is left bare from here - {}", why);
+        }
+    }
+
+    /** A rubble the player carries, by its id - one in the hotbar first; {@code null} for none. */
+    private String rubbleCarried() {
+        if (inventory == null) {
+            return null;
+        }
+        for (String section : List.of("Hotbar", "Storage", "Backpack")) {
+            meridian.core.api.PlayerState.Section s = inventory.inventories().get(section);
+            if (s == null) {
+                continue;
+            }
+            for (meridian.core.api.Containers.Item item : new java.util.TreeMap<>(s.items()).values()) {
+                if (item != null && rubble(item.id()) && item.quantity() > 0) {
+                    return item.id();
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The rubble lying about the box as items is walked over: one comes down with the block it stood
+     * on when the worker breaks that block in the way of another, before the job has taken it up. It
+     * is the floor's - picked up before any is fetched from a chest. Whether any was picked up.
+     */
+    private boolean pickUpRubble(Job j) throws Exception {
+        if (entities == null) {
+            return false;
+        }
+        BlockBox near = j.box.grow(DROP_AROUND);
+        List<Integer> lying = new ArrayList<>();
+        for (int e : entities.trackedEntities()) {
+            if (!rubble(entities.itemOf(e).orElse(null))) {
+                continue;
+            }
+            Vec3 at = entities.positionOf(e).orElse(null);
+            if (at != null && near.contains((int) Math.floor(at.x()), (int) Math.floor(at.y()), (int) Math.floor(at.z()))) {
+                lying.add(e);
+            }
+        }
+        if (lying.isEmpty()) {
+            return false;
+        }
+        status = progress(j, "picking up the rubble that came down");
+        return worker.pickUp(lying).get() > 0;
+    }
+
+    /** Chests looked into for rubble that held none: not walked to again until one of them shows some. */
+    private final Set<BlockPos> noRubble = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Rubble taken from the job's chests - those it unloads into - as much as the box's floor takes;
+     * whether any came. The chests that held none are remembered: no walk up to them for every cell.
+     */
+    private boolean fetchRubble(Job j) throws Exception {
+        if (j.options.unload() == Unload.OFF) {
+            return false;
+        }
+        int want = (j.box.xMax() - j.box.xMin() + 1) * (j.box.zMax() - j.box.zMin() + 1);
+        for (BlockPos chest : chests(j)) {
+            if (!j.live()) {
+                return false;
+            }
+            if (noRubble.contains(chest)) {
+                continue;
+            }
+            status = progress(j, "fetching rubble from the chest at " + text(chest));
+            Map<String, Integer> got = worker.take(chest, AutoMiner::rubble, want).get();
+            int n = got.values().stream().mapToInt(Integer::intValue).sum();
+            if (n > 0) {
+                log.info("auto-miner: {} rubble taken from the chest at {}", n, text(chest));
+                j.bareWhy = null;
+                return true;
+            }
+            noRubble.add(chest);
+        }
+        return false;
     }
 
     /** A box bigger than this is not counted through for what is left: it would take seconds. */
@@ -1342,7 +1657,8 @@ final class AutoMiner {
         for (int y = box.yMin(); y <= box.yMax(); y++) {
             for (int x = box.xMin(); x <= box.xMax(); x++) {
                 for (int z = box.zMin(); z <= box.zMax(); z++) {
-                    if (world.known(x, y, z) && !world.blockAt(x, y, z).isAir()) {
+                    if (world.known(x, y, z) && !world.blockAt(x, y, z).isAir()
+                            && !(covers(j) && rubble(world.blockAt(x, y, z)))) {
                         n++;
                     }
                 }
@@ -1404,8 +1720,10 @@ final class AutoMiner {
                 : j.count > 0 ? j.dug + " of " + j.count + " " + j.name : j.dug + " " + j.name;
         String pieces = j.box != null && j.pieces > 1 ? ", piece " + (j.pieceAt + 1) + " of " + j.pieces : "";
         String unloaded = j.notLoaded > 0 ? ", " + j.notLoaded + " never loaded" : "";
+        String covered = !j.options.cover() || j.box == null ? "" : ", " + j.covered + " floor cell(s) covered"
+                + (j.leftBare.isEmpty() ? "" : " (" + j.leftBare.size() + " left bare: " + (j.bareWhy != null ? j.bareWhy : "see the log") + ")");
         return "Mining " + what + pieces + ": " + j.broken.size() + " broken, " + j.skipped.size() + " left behind"
-                + unloaded + " - " + doing + ".";
+                + unloaded + covered + " - " + doing + ".";
     }
 
     private static String describe(Job j, Result r) {
@@ -1419,10 +1737,12 @@ final class AutoMiner {
             return head + ".";
         }
         int inTheWay = Math.max(0, r.broken() - r.dug());
-        return String.format(Locale.ROOT, "%s: %d dug%s, %d left behind, %d drop(s) picked up%s%s%s.",
+        return String.format(Locale.ROOT, "%s: %d dug%s, %d left behind, %d drop(s) picked up%s%s%s%s.",
                 head, r.dug(), inTheWay > 0 ? " and " + inTheWay + " in the way" : "", r.skipped(), r.picked(),
                 r.unloaded() > 0 ? ", " + r.unloaded() + " item(s) into chests" : "",
                 r.left() > 0 ? ", " + r.left() + " still to dig" : "",
-                j.notLoaded > 0 ? ", " + j.notLoaded + " cell(s) never loaded" : "");
+                j.notLoaded > 0 ? ", " + j.notLoaded + " cell(s) never loaded" : "",
+                !j.options.cover() || j.box == null ? "" : ", " + r.covered() + " floor cell(s) covered with rubble"
+                        + (r.bare() > 0 ? ", " + r.bare() + " left bare" + (j.bareWhy != null ? " (" + j.bareWhy + ")" : "") : ""));
     }
 }
